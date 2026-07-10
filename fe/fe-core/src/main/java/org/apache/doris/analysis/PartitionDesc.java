@@ -107,14 +107,16 @@ public class PartitionDesc {
             throws AnalysisException {
         List<String> colNames = new ArrayList<>();
         for (Expr expr : exprs) {
-            if ((expr instanceof FunctionCallExpr) && (isListPartition == false)) {
+            if (expr instanceof FunctionCallExpr) {
+                boolean isFirstParam = true;
                 FunctionCallExpr functionCallExpr = (FunctionCallExpr) expr;
                 List<Expr> paramsExpr = functionCallExpr.getParams().exprs();
                 String name = functionCallExpr.getFnName().getFunction();
                 if (RANGE_PARTITION_FUNCTIONS.contains(name)) {
                     for (Expr param : paramsExpr) {
                         if (param instanceof SlotRef) {
-                            if (colNames.isEmpty()) {
+                            if (isFirstParam) {
+                                isFirstParam = false;
                                 colNames.add(((SlotRef) param).getColumnName());
                             } else {
                                 throw new AnalysisException(

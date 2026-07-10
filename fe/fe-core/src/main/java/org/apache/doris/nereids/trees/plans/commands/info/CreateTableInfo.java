@@ -1688,8 +1688,7 @@ public class CreateTableInfo {
         List<Expression> paritionExprs = partitionTableInfo.getPartitionList();
         for (Expression expr : paritionExprs) {
             if (expr instanceof UnboundFunction) {
-                if (!partitionTableInfo.isAutoPartition()
-                        || partitionTableInfo.getPartitionType() != PartitionType.RANGE.name()) {
+                if (!partitionTableInfo.isAutoPartition()) {
                     throw new AnalysisException("only Auto Range Partition support UnboundFunction");
                 }
                 UnboundFunction func = (UnboundFunction) expr;
