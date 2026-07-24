@@ -19,6 +19,7 @@ package org.apache.doris.catalog;
 
 import org.apache.doris.analysis.DateLiteral;
 import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.MaxLiteral;
 import org.apache.doris.analysis.NullLiteral;
 import org.apache.doris.analysis.PartitionDesc;
@@ -275,6 +276,10 @@ public class PartitionInfo {
 
     public boolean enableAutomaticPartition() {
         return isAutoCreatePartitions;
+    }
+
+    public boolean hasPartitionFunction() {
+        return partitionExprs != null && partitionExprs.stream().anyMatch(expr -> expr instanceof FunctionCallExpr);
     }
 
     // forbid change metadata.

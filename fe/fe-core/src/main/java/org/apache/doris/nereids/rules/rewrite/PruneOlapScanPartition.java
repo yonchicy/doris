@@ -17,6 +17,7 @@
 
 package org.apache.doris.nereids.rules.rewrite;
 
+import org.apache.doris.analysis.Expr;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.MaterializedIndex;
@@ -24,6 +25,7 @@ import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
 import org.apache.doris.catalog.PartitionInfo;
 import org.apache.doris.catalog.PartitionItem;
+import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.catalog.Tablet;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.cache.NereidsSortedPartitionsCacheManager;
@@ -176,10 +178,18 @@ public class PruneOlapScanPartition implements RewriteRuleFactory {
                     .filter(manuallySpecifiedPartitions::contains)
                     .collect(Collectors.toMap(Function.identity(), allPartitions::get));
         }
+        boolean hasListPartitionFunction = partitionInfo.getType() == PartitionType.LIST
+                && partitionInfo.hasPartitionFunction();
+        List<Expr> partitionExprs = hasListPartitionFunction
+                ? partitionInfo.getPartitionExprs()
+                : ImmutableList.of();
+        if (!partitionExprs.isEmpty()) {
+            sortedPartitionRanges = Optional.empty();
+        }
         if (filter != null) {
             return PartitionPruner.pruneWithResult(
                     partitionSlots, filter.getPredicate(), idToPartitions, ctx.cascadesContext,
-                    PartitionTableType.OLAP, sortedPartitionRanges);
+                    PartitionTableType.OLAP, sortedPartitionRanges, partitionExprs);
         } else if (!manuallySpecifiedPartitions.isEmpty()) {
             return new PartitionPruneResult<>(Utils.fastToImmutableList(idToPartitions.keySet()),
                     Optional.empty(), true);

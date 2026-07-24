@@ -216,6 +216,23 @@ public class PartitionPruner extends DefaultExpressionRewriter<Void> {
 
         partitionPredicate = OrToIn.EXTRACT_MODE_INSTANCE.rewriteTree(
                 partitionPredicate, new ExpressionRewriteContext(cascadesContext));
+        if (!partitionExprs.isEmpty()) {
+            partitionPredicate = DateTruncPartitionPredicateRewriter.rewrite(
+                    partitionPredicate, partitionExprs, cascadesContext);
+            // The rewritten predicate is only a necessary condition for selecting partitions,
+            // so every result in this block keeps the original filter.
+            if (BooleanLiteral.TRUE.equals(partitionPredicate)) {
+                return new PartitionPruneResult<>(Utils.fastToImmutableList(idToPartitions.keySet()),
+                        Optional.empty(), false);
+            } else if (BooleanLiteral.FALSE.equals(partitionPredicate) || partitionPredicate.isNullLiteral()) {
+                return new PartitionPruneResult<>(ImmutableList.<K>of(), Optional.empty(), true);
+            }
+
+            Pair<List<K>, Boolean> res = sequentialFiltering(
+                    idToPartitions, partitionSlots, partitionPredicate, cascadesContext, expandThreshold);
+            return new PartitionPruneResult<>(res.first, Optional.empty(),
+                    hasEffectivePartitionPredicate(res.first, idToPartitions.size()));
+        }
         if (BooleanLiteral.TRUE.equals(partitionPredicate)) {
             // The partition column predicate is always true and can be deleted, the partition cannot be pruned
             return new PartitionPruneResult<>(Utils.fastToImmutableList(idToPartitions.keySet()),
