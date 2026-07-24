@@ -17,6 +17,7 @@
 
 package org.apache.doris.nereids.rules.expression.rules;
 
+import org.apache.doris.analysis.Expr;
 import org.apache.doris.catalog.ListPartitionItem;
 import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.RangePartitionItem;
@@ -154,8 +155,20 @@ public class PartitionPruner extends DefaultExpressionRewriter<Void> {
             Expression partitionPredicate,
             Map<K, PartitionItem> idToPartitions, CascadesContext cascadesContext,
             PartitionTableType partitionTableType, Optional<SortedPartitionRanges<K>> sortedPartitionRanges) {
+        return prune(partitionSlots, partitionPredicate, idToPartitions, cascadesContext, partitionTableType,
+                sortedPartitionRanges, ImmutableList.of());
+    }
+
+    /**
+     * prune partition with `idToPartitions` and partition expressions as parameter.
+     */
+    public static <K extends Comparable<K>> Pair<List<K>, Optional<Expression>> prune(List<Slot> partitionSlots,
+            Expression partitionPredicate,
+            Map<K, PartitionItem> idToPartitions, CascadesContext cascadesContext,
+            PartitionTableType partitionTableType, Optional<SortedPartitionRanges<K>> sortedPartitionRanges,
+            List<Expr> partitionExprs) {
         PartitionPruneResult<K> result = pruneWithResult(partitionSlots, partitionPredicate, idToPartitions,
-                cascadesContext, partitionTableType, sortedPartitionRanges);
+                cascadesContext, partitionTableType, sortedPartitionRanges, partitionExprs);
         return Pair.of(result.partitions, result.prunedPartitionPredicate);
     }
 
@@ -164,11 +177,21 @@ public class PartitionPruner extends DefaultExpressionRewriter<Void> {
             Expression partitionPredicate,
             Map<K, PartitionItem> idToPartitions, CascadesContext cascadesContext,
             PartitionTableType partitionTableType, Optional<SortedPartitionRanges<K>> sortedPartitionRanges) {
+        return pruneWithResult(partitionSlots, partitionPredicate, idToPartitions, cascadesContext,
+                partitionTableType, sortedPartitionRanges, ImmutableList.of());
+    }
+
+    /** prune partition and return partition predicate info. */
+    public static <K extends Comparable<K>> PartitionPruneResult<K> pruneWithResult(List<Slot> partitionSlots,
+            Expression partitionPredicate,
+            Map<K, PartitionItem> idToPartitions, CascadesContext cascadesContext,
+            PartitionTableType partitionTableType, Optional<SortedPartitionRanges<K>> sortedPartitionRanges,
+            List<Expr> partitionExprs) {
         long startAt = System.currentTimeMillis();
         try {
             return pruneInternal(partitionSlots, partitionPredicate, idToPartitions, cascadesContext,
                     partitionTableType,
-                    sortedPartitionRanges);
+                    sortedPartitionRanges, partitionExprs);
         } finally {
             SummaryProfile profile = SummaryProfile.getSummaryProfile(cascadesContext.getConnectContext());
             if (profile != null) {
@@ -181,7 +204,8 @@ public class PartitionPruner extends DefaultExpressionRewriter<Void> {
             List<Slot> partitionSlots,
             Expression partitionPredicate,
             Map<K, PartitionItem> idToPartitions, CascadesContext cascadesContext,
-            PartitionTableType partitionTableType, Optional<SortedPartitionRanges<K>> sortedPartitionRanges) {
+            PartitionTableType partitionTableType, Optional<SortedPartitionRanges<K>> sortedPartitionRanges,
+            List<Expr> partitionExprs) {
         partitionPredicate = PartitionPruneExpressionExtractor.extract(
                 partitionPredicate, ImmutableSet.copyOf(partitionSlots), cascadesContext);
         Expression originalPartitionPredicate = partitionPredicate;
@@ -201,7 +225,7 @@ public class PartitionPruner extends DefaultExpressionRewriter<Void> {
             return new PartitionPruneResult<>(ImmutableList.<K>of(), Optional.empty(), true);
         }
 
-        if (sortedPartitionRanges.isPresent()) {
+        if (sortedPartitionRanges.isPresent() && partitionExprs.isEmpty()) {
             RangeSet<MultiColumnBound> predicateRanges = partitionPredicate.accept(
                     new PartitionPredicateToRange(partitionSlots), null);
             if (predicateRanges != null) {
