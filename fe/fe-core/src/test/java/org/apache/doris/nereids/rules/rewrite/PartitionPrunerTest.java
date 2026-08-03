@@ -17,12 +17,17 @@
 
 package org.apache.doris.nereids.rules.rewrite;
 
+import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.PartitionValue;
+import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.StringLiteral;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.ListPartitionItem;
 import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.nereids.CascadesContext;
@@ -31,17 +36,21 @@ import org.apache.doris.nereids.rules.expression.rules.OnePartitionEvaluator;
 import org.apache.doris.nereids.rules.expression.rules.PartitionPruner;
 import org.apache.doris.nereids.rules.expression.rules.PartitionPruner.PartitionPruneResult;
 import org.apache.doris.nereids.rules.expression.rules.PartitionPruner.PartitionTableType;
+import org.apache.doris.nereids.rules.expression.rules.SortedPartitionRanges;
 import org.apache.doris.nereids.trees.expressions.And;
 import org.apache.doris.nereids.trees.expressions.EqualTo;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.GreaterThan;
 import org.apache.doris.nereids.trees.expressions.InPredicate;
 import org.apache.doris.nereids.trees.expressions.IsNull;
+import org.apache.doris.nereids.trees.expressions.LessThan;
 import org.apache.doris.nereids.trees.expressions.Not;
 import org.apache.doris.nereids.trees.expressions.Or;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
+import org.apache.doris.nereids.trees.expressions.literal.DateTimeV2Literal;
 import org.apache.doris.nereids.trees.expressions.literal.Literal;
 import org.apache.doris.nereids.trees.expressions.literal.NullLiteral;
+import org.apache.doris.nereids.types.DateTimeV2Type;
 import org.apache.doris.nereids.types.IntegerType;
 import org.apache.doris.nereids.types.VarcharType;
 import org.apache.doris.utframe.TestWithFeService;
@@ -344,12 +353,57 @@ public class PartitionPrunerTest extends TestWithFeService {
         Assertions.assertTrue(result.hasPartitionPredicate);
     }
 
+    @Test
+    public void testDateTruncListPartitionPrune() throws AnalysisException {
+        Column dateColumn1 = new Column("dt1", ScalarType.createDatetimeV2Type(0));
+        Column dateColumn2 = new Column("dt2", ScalarType.createDatetimeV2Type(0));
+        SlotReference dateSlot1 = new SlotReference("dt1", DateTimeV2Type.SYSTEM_DEFAULT);
+        SlotReference dateSlot2 = new SlotReference("dt2", DateTimeV2Type.SYSTEM_DEFAULT);
+        List<Column> dateColumns = ImmutableList.of(dateColumn1, dateColumn2);
+        Map<String, PartitionItem> idToPartitions = ImmutableMap.of(
+                "p1", createListPartitionItem(dateColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-24 00:00:00", "2025-07-24 00:00:00"),
+                        ImmutableList.of("2026-07-23 00:00:00", "2025-07-23 00:00:00"))),
+                "p2", createListPartitionItem(dateColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-24 00:00:00", "2025-07-23 00:00:00"))),
+                "p3", createListPartitionItem(dateColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-23 00:00:00", "2025-07-24 00:00:00"))));
+        FunctionCallExpr dateTrunc1 = new FunctionCallExpr("date_trunc",
+                ImmutableList.of(new SlotRef(null, "dt1"), new StringLiteral("day")), true);
+        FunctionCallExpr dateTrunc2 = new FunctionCallExpr("date_trunc",
+                ImmutableList.of(new SlotRef(null, "dt2"), new StringLiteral("day")), true);
+        Expression predicate = new And(
+                new And(
+                        new GreaterThan(dateSlot1, new DateTimeV2Literal("2026-07-23 02:00:00")),
+                        new LessThan(dateSlot1, new DateTimeV2Literal("2026-07-23 18:00:00"))),
+                new And(
+                        new GreaterThan(dateSlot2, new DateTimeV2Literal("2025-07-23 02:00:00")),
+                        new LessThan(dateSlot2, new DateTimeV2Literal("2025-07-23 18:00:00"))));
+
+        PartitionPruneResult<String> result = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot1, dateSlot2), predicate, idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, ImmutableList.<Expr>of(dateTrunc1, dateTrunc2),
+                Optional.of(SortedPartitionRanges.build(idToPartitions)));
+
+        Assertions.assertEquals(ImmutableList.of("p1"), result.partitions);
+    }
+
     private ListPartitionItem createListPartitionItem(String... values) throws AnalysisException {
         ImmutableList.Builder<PartitionKey> partitionKeys = ImmutableList.builder();
         for (String value : values) {
             PartitionValue partitionValue = new PartitionValue(value);
             partitionKeys.add(PartitionKey.createPartitionKey(
                     ImmutableList.of(partitionValue), ImmutableList.of(partitionColumn)));
+        }
+        return new ListPartitionItem(partitionKeys.build());
+    }
+
+    private ListPartitionItem createListPartitionItem(List<Column> columns, List<List<String>> items)
+            throws AnalysisException {
+        ImmutableList.Builder<PartitionKey> partitionKeys = ImmutableList.builder();
+        for (List<String> values : items) {
+            partitionKeys.add(PartitionKey.createPartitionKey(
+                    values.stream().map(PartitionValue::new).collect(ImmutableList.toImmutableList()), columns));
         }
         return new ListPartitionItem(partitionKeys.build());
     }

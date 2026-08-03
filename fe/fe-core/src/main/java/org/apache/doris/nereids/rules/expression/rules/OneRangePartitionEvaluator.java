@@ -83,7 +83,9 @@ public class OneRangePartitionEvaluator<K>
         implements OnePartitionEvaluator<K> {
     private final K partitionIdent;
     private final List<Slot> partitionSlots;
-    private final RangePartitionItem partitionItem;
+    private final boolean defaultPartition;
+    private final boolean independentRangeMode;
+    private final List<Map<Slot, PartitionSlotInput>> independentRangeInputs;
     private final ExpressionRewriteContext expressionRewriteContext;
     private final List<PartitionSlotType> partitionSlotTypes;
     private final List<Literal> lowers;
@@ -98,7 +100,10 @@ public class OneRangePartitionEvaluator<K>
             RangePartitionItem partitionItem, CascadesContext cascadesContext, int expandThreshold) {
         this.partitionIdent = partitionIdent;
         this.partitionSlots = Objects.requireNonNull(partitionSlots, "partitionSlots cannot be null");
-        this.partitionItem = Objects.requireNonNull(partitionItem, "partitionItem cannot be null");
+        Objects.requireNonNull(partitionItem, "partitionItem cannot be null");
+        this.defaultPartition = partitionItem.isDefaultPartition();
+        this.independentRangeMode = false;
+        this.independentRangeInputs = ImmutableList.of();
         this.expressionRewriteContext = new ExpressionRewriteContext(
                 Objects.requireNonNull(cascadesContext, "cascadesContext cannot be null"));
 
@@ -153,6 +158,32 @@ public class OneRangePartitionEvaluator<K>
         this.inputs = Utils.allCombinations(expandInputs);
     }
 
+    static <K> OneRangePartitionEvaluator<K> forIndependentRanges(K partitionIdent, List<Slot> partitionSlots,
+            List<Map<Slot, PartitionSlotInput>> independentRangeInputs, CascadesContext cascadesContext,
+            boolean defaultPartition) {
+        return new OneRangePartitionEvaluator<>(partitionIdent, partitionSlots, independentRangeInputs,
+                cascadesContext, defaultPartition);
+    }
+
+    private OneRangePartitionEvaluator(K partitionIdent, List<Slot> partitionSlots,
+            List<Map<Slot, PartitionSlotInput>> independentRangeInputs, CascadesContext cascadesContext,
+            boolean defaultPartition) {
+        this.partitionIdent = partitionIdent;
+        this.partitionSlots = partitionSlots;
+        this.defaultPartition = defaultPartition;
+        this.independentRangeMode = true;
+        this.expressionRewriteContext = new ExpressionRewriteContext(cascadesContext);
+        this.partitionSlotTypes = ImmutableList.of();
+        this.lowers = ImmutableList.of();
+        this.uppers = ImmutableList.of();
+        this.inputs = ImmutableList.of();
+        this.partitionSlotContainsNull = Maps.newHashMap();
+        this.slotToType = ImmutableMap.of();
+        this.independentRangeInputs = independentRangeInputs.stream()
+                .map(this::fillSlotRangesToInputs)
+                .collect(ImmutableList.toImmutableList());
+    }
+
     @Override
     public K getPartitionIdent() {
         return partitionIdent;
@@ -160,6 +191,9 @@ public class OneRangePartitionEvaluator<K>
 
     @Override
     public List<Map<Slot, PartitionSlotInput>> getOnePartitionInputs() {
+        if (independentRangeMode) {
+            return independentRangeInputs;
+        }
         if (partitionSlots.size() == 1 && inputs.size() == 1 && inputs.get(0).size() == 1
                 && inputs.get(0).get(0) instanceof Literal) {
             // fast path
@@ -420,6 +454,10 @@ public class OneRangePartitionEvaluator<K>
 
         andResult = returnFalseIfExistEmptyRange(andResult);
         if (andResult.result.equals(BooleanLiteral.FALSE)) {
+            return andResult;
+        }
+
+        if (independentRangeMode) {
             return andResult;
         }
 
@@ -732,7 +770,7 @@ public class OneRangePartitionEvaluator<K>
 
     @Override
     public boolean isDefaultPartition() {
-        return partitionItem.isDefaultPartition();
+        return defaultPartition;
     }
 
     private List<Map<Slot, PartitionSlotInput>> computeSinglePartitionValueInputs() {

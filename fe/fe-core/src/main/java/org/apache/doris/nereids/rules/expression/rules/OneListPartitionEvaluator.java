@@ -17,11 +17,16 @@
 
 package org.apache.doris.nereids.rules.expression.rules;
 
+import org.apache.doris.analysis.DateLiteral;
+import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.LiteralExpr;
+import org.apache.doris.analysis.StringLiteral;
 import org.apache.doris.catalog.ListPartitionItem;
 import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.common.Pair;
 import org.apache.doris.nereids.CascadesContext;
+import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.rules.expression.ExpressionRewriteContext;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.InPredicate;
@@ -31,10 +36,13 @@ import org.apache.doris.nereids.trees.expressions.literal.Literal;
 import org.apache.doris.nereids.trees.expressions.literal.NullLiteral;
 import org.apache.doris.nereids.trees.expressions.visitor.DefaultExpressionRewriter;
 
+import com.google.common.collect.BoundType;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.IntStream;
@@ -46,14 +54,25 @@ public class OneListPartitionEvaluator<K>
     private final List<Slot> partitionSlots;
     private final ListPartitionItem partitionItem;
     private final ExpressionRewriteContext expressionRewriteContext;
+    private final OneRangePartitionEvaluator<K> rangePartitionEvaluator;
 
     public OneListPartitionEvaluator(K partitionIdent, List<Slot> partitionSlots,
             ListPartitionItem partitionItem, CascadesContext cascadesContext) {
+        this(partitionIdent, partitionSlots, partitionItem, ImmutableList.of(), cascadesContext);
+    }
+
+    /** Create a LIST evaluator with optional partition expressions. */
+    public OneListPartitionEvaluator(K partitionIdent, List<Slot> partitionSlots,
+            ListPartitionItem partitionItem, List<Expr> partitionExprs, CascadesContext cascadesContext) {
         this.partitionIdent = partitionIdent;
         this.partitionSlots = Objects.requireNonNull(partitionSlots, "partitionSlots cannot be null");
         this.partitionItem = Objects.requireNonNull(partitionItem, "partitionItem cannot be null");
         this.expressionRewriteContext = new ExpressionRewriteContext(
                 Objects.requireNonNull(cascadesContext, "cascadesContext cannot be null"));
+        this.rangePartitionEvaluator = partitionExprs.stream().anyMatch(OneListPartitionEvaluator::isDateTrunc)
+                ? OneRangePartitionEvaluator.forIndependentRanges(partitionIdent, partitionSlots,
+                        getIndependentRangeInputs(partitionExprs), cascadesContext, partitionItem.isDefaultPartition())
+                : null;
     }
 
     @Override
@@ -63,6 +82,9 @@ public class OneListPartitionEvaluator<K>
 
     @Override
     public List<Map<Slot, PartitionSlotInput>> getOnePartitionInputs() {
+        if (rangePartitionEvaluator != null) {
+            return rangePartitionEvaluator.getOnePartitionInputs();
+        }
         if (partitionSlots.size() == 1) {
             // fast path
             return getInputsByOneSlot();
@@ -70,6 +92,76 @@ public class OneListPartitionEvaluator<K>
             // slow path
             return getInputsByMultiSlots();
         }
+    }
+
+    private List<Map<Slot, PartitionSlotInput>> getIndependentRangeInputs(List<Expr> partitionExprs) {
+        List<Map<Slot, PartitionSlotInput>> inputs = new ArrayList<>(partitionItem.getItems().size());
+        for (PartitionKey item : partitionItem.getItems()) {
+            ImmutableMap.Builder<Slot, PartitionSlotInput> inputBuilder = ImmutableMap.builder();
+            for (int i = 0; i < partitionSlots.size(); i++) {
+                Slot partitionSlot = partitionSlots.get(i);
+                LiteralExpr legacyLiteral = item.getKeys().get(i);
+                Literal literal = Literal.fromLegacyLiteral(legacyLiteral, legacyLiteral.getType());
+                Expr partitionExpr = partitionExprs.get(i);
+                if (isDateTrunc(partitionExpr)) {
+                    ColumnRange range = getDateTruncRange((DateLiteral) legacyLiteral,
+                            (FunctionCallExpr) partitionExpr);
+                    inputBuilder.put(partitionSlot, new PartitionSlotInput(partitionSlot,
+                            ImmutableMap.of(partitionSlot, range)));
+                } else {
+                    inputBuilder.put(partitionSlot, new PartitionSlotInput(literal,
+                            ImmutableMap.of(partitionSlot, ColumnRange.singleton(literal))));
+                }
+            }
+            inputs.add(inputBuilder.build());
+        }
+        return inputs;
+    }
+
+    static boolean isDateTrunc(Expr partitionExpr) {
+        return partitionExpr instanceof FunctionCallExpr
+                && ((FunctionCallExpr) partitionExpr).getFnName().getFunction().equalsIgnoreCase("date_trunc");
+    }
+
+    private ColumnRange getDateTruncRange(DateLiteral lower, FunctionCallExpr dateTrunc) {
+        String timeUnit = ((StringLiteral) dateTrunc.getParams().exprs().get(1))
+                .getStringValue().toLowerCase(Locale.ROOT);
+        DateLiteral upper;
+        try {
+            switch (timeUnit) {
+                case "year":
+                    upper = lower.plusYears(1);
+                    break;
+                case "quarter":
+                    upper = lower.plusMonths(3);
+                    break;
+                case "month":
+                    upper = lower.plusMonths(1);
+                    break;
+                case "week":
+                    upper = lower.plusDays(7);
+                    break;
+                case "day":
+                    upper = lower.plusDays(1);
+                    break;
+                case "hour":
+                    upper = lower.plusHours(1);
+                    break;
+                case "minute":
+                    upper = lower.plusMinutes(1);
+                    break;
+                case "second":
+                    upper = lower.plusSeconds(1);
+                    break;
+                default:
+                    throw new AnalysisException("Unsupported date_trunc time unit: " + timeUnit);
+            }
+        } catch (org.apache.doris.common.AnalysisException e) {
+            throw new AnalysisException(e.getMessage(), e);
+        }
+        Literal lowerLiteral = Literal.fromLegacyLiteral(lower, lower.getType());
+        Literal upperLiteral = Literal.fromLegacyLiteral(upper, upper.getType());
+        return ColumnRange.range(lowerLiteral, BoundType.CLOSED, upperLiteral, BoundType.OPEN);
     }
 
     private List<Map<Slot, PartitionSlotInput>> getInputsByOneSlot() {
@@ -152,6 +244,9 @@ public class OneListPartitionEvaluator<K>
 
     @Override
     public Expression evaluate(Expression expression, Map<Slot, PartitionSlotInput> currentInputs) {
+        if (rangePartitionEvaluator != null) {
+            return rangePartitionEvaluator.evaluate(expression, currentInputs);
+        }
         return expression.accept(this, currentInputs);
     }
 
