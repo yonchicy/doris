@@ -100,8 +100,10 @@ public class CreateTableInfoTest {
                 new UnboundSlot("event_time"), new StringLiteral("%Y-%m-%d")));
         PartitionTableInfo partitionTableInfo = manualListPartition(dateFormat);
 
-        Assertions.assertThrows(AnalysisException.class,
+        AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
                 () -> createTableInfo(partitionTableInfo).checkLegalityOfPartitionExprs(partitionTableInfo));
+        Assertions.assertEquals("LIST partition only support date_trunc function expression",
+                exception.getMessage());
     }
 
     @Test
@@ -113,15 +115,23 @@ public class CreateTableInfoTest {
                 ImmutableList.of(new StringLiteral("event_time"), new StringLiteral("day")),
                 ImmutableList.of(new UnboundSlot("event_time"), new UnboundSlot("day")),
                 ImmutableList.of(new UnboundSlot("event_time"), new IntegerLiteral(1)));
+        List<String> expectedErrors = ImmutableList.of(
+                "date_trunc params exprs size should be 2.",
+                "date_trunc params exprs size should be 2.",
+                "date_trunc first param should be slot ref.",
+                "date_trunc param of time unit is not string literal.",
+                "Unsupported date_trunc time unit: 1");
 
-        for (List<Expression> arguments : invalidArguments) {
+        for (int i = 0; i < invalidArguments.size(); i++) {
+            List<Expression> arguments = invalidArguments.get(i);
             PartitionTableInfo partitionTableInfo = manualListPartition(
                     new UnboundFunction("date_trunc", arguments));
-            Assertions.assertThrows(AnalysisException.class,
+            AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
                     () -> validatePartitionInfo(partitionTableInfo,
                             column("event_time", DateTimeType.INSTANCE),
                             column("day", DateTimeType.INSTANCE)),
                     "date_trunc arguments should be exactly (slot, string literal): " + arguments);
+            Assertions.assertEquals(expectedErrors.get(i), exception.getMessage());
         }
     }
 
@@ -130,9 +140,10 @@ public class CreateTableInfoTest {
         PartitionTableInfo partitionTableInfo = manualListPartition(
                 dateTrunc("event_time", "invalid_unit"));
 
-        Assertions.assertThrows(AnalysisException.class,
+        AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
                 () -> validatePartitionInfo(
                         partitionTableInfo, column("event_time", DateTimeType.INSTANCE)));
+        Assertions.assertEquals("Unsupported date_trunc time unit: invalid_unit", exception.getMessage());
     }
 
     @Test
@@ -156,8 +167,11 @@ public class CreateTableInfoTest {
     public void testManualListDateTruncRejectsNonDateColumn() {
         PartitionTableInfo partitionTableInfo = manualListPartition(dateTrunc("event_time"));
 
-        Assertions.assertThrows(AnalysisException.class,
+        AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
                 () -> validatePartitionInfo(partitionTableInfo, column("event_time", IntegerType.INSTANCE)));
+        Assertions.assertTrue(exception.getMessage().contains("partition expr"));
+        Assertions.assertTrue(exception.getMessage().contains("date_trunc"));
+        Assertions.assertTrue(exception.getMessage().contains("is illegal"));
     }
 
     @Test
@@ -165,7 +179,7 @@ public class CreateTableInfoTest {
         PartitionTableInfo partitionTableInfo = manualListPartition(
                 dateTrunc("event_time"),
                 new UnboundSlot("region_id"),
-                dateTrunc("created_time"));
+                dateTrunc("created_time", "hour"));
 
         validatePartitionInfo(partitionTableInfo,
                 column("event_time", DateTimeType.INSTANCE),
@@ -176,6 +190,18 @@ public class CreateTableInfoTest {
                 ImmutableList.of("event_time", "region_id", "created_time"),
                 partitionTableInfo.getIdentifierPartitionColumns());
         Assertions.assertFalse(partitionTableInfo.isAutoPartition());
+    }
+
+    @Test
+    public void testManualListRejectsRepeatedUnderlyingColumn() {
+        PartitionTableInfo partitionTableInfo = manualListPartition(
+                dateTrunc("event_time"), new UnboundSlot("event_time"));
+
+        AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
+                () -> validatePartitionInfo(
+                        partitionTableInfo, column("event_time", DateTimeType.INSTANCE)));
+
+        Assertions.assertEquals("Duplicated partition column event_time", exception.getMessage());
     }
 
     @Test

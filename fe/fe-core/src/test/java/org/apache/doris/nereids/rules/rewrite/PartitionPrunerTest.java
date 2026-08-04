@@ -368,17 +368,11 @@ public class PartitionPrunerTest extends TestWithFeService {
                         ImmutableList.of("2026-07-24 00:00:00", "2025-07-23 00:00:00"))),
                 "p3", createListPartitionItem(dateColumns, ImmutableList.of(
                         ImmutableList.of("2026-07-23 00:00:00", "2025-07-24 00:00:00"))));
-        FunctionCallExpr dateTrunc1 = new FunctionCallExpr("date_trunc",
-                ImmutableList.of(new SlotRef(null, "dt1"), new StringLiteral("day")), true);
-        FunctionCallExpr dateTrunc2 = new FunctionCallExpr("date_trunc",
-                ImmutableList.of(new SlotRef(null, "dt2"), new StringLiteral("day")), true);
+        FunctionCallExpr dateTrunc1 = dateTrunc("dt1", "day");
+        FunctionCallExpr dateTrunc2 = dateTrunc("dt2", "day");
         Expression predicate = new And(
-                new And(
-                        new GreaterThan(dateSlot1, new DateTimeV2Literal("2026-07-23 02:00:00")),
-                        new LessThan(dateSlot1, new DateTimeV2Literal("2026-07-23 18:00:00"))),
-                new And(
-                        new GreaterThan(dateSlot2, new DateTimeV2Literal("2025-07-23 02:00:00")),
-                        new LessThan(dateSlot2, new DateTimeV2Literal("2025-07-23 18:00:00"))));
+                dateTimeRange(dateSlot1, "2026-07-23 02:00:00", "2026-07-23 18:00:00"),
+                dateTimeRange(dateSlot2, "2025-07-23 02:00:00", "2025-07-23 18:00:00"));
 
         PartitionPruneResult<String> result = PartitionPruner.pruneWithResult(
                 ImmutableList.of(dateSlot1, dateSlot2), predicate, idToPartitions, cascadesContext,
@@ -386,6 +380,129 @@ public class PartitionPrunerTest extends TestWithFeService {
                 Optional.of(SortedPartitionRanges.build(idToPartitions)));
 
         Assertions.assertEquals(ImmutableList.of("p1"), result.partitions);
+
+        Expression disjointPredicate = new And(
+                dateTimeRange(dateSlot1, "2026-07-25 02:00:00", "2026-07-25 18:00:00"),
+                dateTimeRange(dateSlot2, "2025-07-25 02:00:00", "2025-07-25 18:00:00"));
+        PartitionPruneResult<String> disjointResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot1, dateSlot2), disjointPredicate, idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, ImmutableList.<Expr>of(dateTrunc1, dateTrunc2),
+                Optional.of(SortedPartitionRanges.build(idToPartitions)));
+
+        Assertions.assertEquals(ImmutableList.of(), disjointResult.partitions);
+    }
+
+    @Test
+    public void testDateTruncListPartitionPreservesTupleCorrelation() throws AnalysisException {
+        Column dateColumn1 = new Column("dt1", ScalarType.createDatetimeV2Type(0));
+        Column dateColumn2 = new Column("dt2", ScalarType.createDatetimeV2Type(0));
+        SlotReference dateSlot1 = new SlotReference("dt1", DateTimeV2Type.SYSTEM_DEFAULT);
+        SlotReference dateSlot2 = new SlotReference("dt2", DateTimeV2Type.SYSTEM_DEFAULT);
+        List<Column> dateColumns = ImmutableList.of(dateColumn1, dateColumn2);
+        Map<String, PartitionItem> idToPartitions = ImmutableMap.of(
+                "pCross", createListPartitionItem(dateColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-23 00:00:00", "2025-07-24 00:00:00"),
+                        ImmutableList.of("2026-07-24 00:00:00", "2025-07-23 00:00:00"))),
+                "pExact", createListPartitionItem(dateColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-23 00:00:00", "2025-07-23 00:00:00"))));
+        List<Expr> partitionExprs = ImmutableList.of(
+                dateTrunc("dt1", "day"), dateTrunc("dt2", "day"));
+
+        Expression exactPredicate = new And(
+                dateTimeRange(dateSlot1, "2026-07-23 02:00:00", "2026-07-23 18:00:00"),
+                dateTimeRange(dateSlot2, "2025-07-23 02:00:00", "2025-07-23 18:00:00"));
+        PartitionPruneResult<String> exactResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot1, dateSlot2), exactPredicate, idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+
+        Assertions.assertEquals(ImmutableList.of("pExact"), exactResult.partitions);
+
+        Expression crossPredicate = new And(
+                dateTimeRange(dateSlot1, "2026-07-23 02:00:00", "2026-07-23 18:00:00"),
+                dateTimeRange(dateSlot2, "2025-07-24 02:00:00", "2025-07-24 18:00:00"));
+        PartitionPruneResult<String> crossResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot1, dateSlot2), crossPredicate, idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+
+        Assertions.assertEquals(ImmutableList.of("pCross"), crossResult.partitions);
+    }
+
+    @Test
+    public void testDateTruncListPartitionWithPlainColumn() throws AnalysisException {
+        Column dateColumn = new Column("dt", ScalarType.createDatetimeV2Type(0));
+        Column regionColumn = new Column("region", PrimitiveType.INT);
+        SlotReference dateSlot = new SlotReference("dt", DateTimeV2Type.SYSTEM_DEFAULT);
+        SlotReference regionSlot = new SlotReference("region", IntegerType.INSTANCE);
+        List<Column> partitionColumns = ImmutableList.of(dateColumn, regionColumn);
+        Map<String, PartitionItem> idToPartitions = ImmutableMap.of(
+                "p1", createListPartitionItem(partitionColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-23 00:00:00", "1"))),
+                "p2", createListPartitionItem(partitionColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-23 00:00:00", "2"))),
+                "p3", createListPartitionItem(partitionColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-24 00:00:00", "1"))));
+        List<Expr> partitionExprs = ImmutableList.of(
+                dateTrunc("dt", "day"), new SlotRef(null, "region"));
+        Expression predicate = new And(
+                dateTimeRange(dateSlot, "2026-07-23 02:00:00", "2026-07-23 18:00:00"),
+                new EqualTo(regionSlot, Literal.of(1)));
+
+        PartitionPruneResult<String> result = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot, regionSlot), predicate, idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+
+        Assertions.assertEquals(ImmutableList.of("p1"), result.partitions);
+    }
+
+    @Test
+    public void testDateTruncListPartitionTimeUnitRanges() throws AnalysisException {
+        assertDateTruncRange("year", "2026-01-01 00:00:00",
+                "2026-07-23 16:00:00", "2027-01-01 00:00:00");
+        assertDateTruncRange("quarter", "2026-07-01 00:00:00",
+                "2026-08-15 16:00:00", "2026-10-01 00:00:00");
+        assertDateTruncRange("month", "2026-07-01 00:00:00",
+                "2026-07-23 16:00:00", "2026-08-01 00:00:00");
+        assertDateTruncRange("week", "2026-07-20 00:00:00",
+                "2026-07-23 16:00:00", "2026-07-27 00:00:00");
+        assertDateTruncRange("day", "2026-07-23 00:00:00",
+                "2026-07-23 16:00:00", "2026-07-24 00:00:00");
+        assertDateTruncRange("hour", "2026-07-23 16:00:00",
+                "2026-07-23 16:30:00", "2026-07-23 17:00:00");
+        assertDateTruncRange("minute", "2026-07-23 16:45:00",
+                "2026-07-23 16:45:30", "2026-07-23 16:46:00");
+        assertDateTruncRange("second", "2026-07-23 16:45:30",
+                "2026-07-23 16:45:30", "2026-07-23 16:45:31");
+    }
+
+    private FunctionCallExpr dateTrunc(String columnName, String timeUnit) {
+        return new FunctionCallExpr("date_trunc",
+                ImmutableList.of(new SlotRef(null, columnName), new StringLiteral(timeUnit)), true);
+    }
+
+    private Expression dateTimeRange(SlotReference slot, String lower, String upper) {
+        return new And(
+                new GreaterThan(slot, new DateTimeV2Literal(lower)),
+                new LessThan(slot, new DateTimeV2Literal(upper)));
+    }
+
+    private void assertDateTruncRange(String timeUnit, String lower, String inside, String upper)
+            throws AnalysisException {
+        Column dateColumn = new Column("dt", ScalarType.createDatetimeV2Type(0));
+        SlotReference dateSlot = new SlotReference("dt", DateTimeV2Type.SYSTEM_DEFAULT);
+        Map<String, PartitionItem> idToPartitions = ImmutableMap.of(
+                "p1", createListPartitionItem(ImmutableList.of(dateColumn), ImmutableList.of(
+                        ImmutableList.of(lower))));
+        List<Expr> partitionExprs = ImmutableList.of(dateTrunc("dt", timeUnit));
+
+        PartitionPruneResult<String> insideResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new EqualTo(dateSlot, new DateTimeV2Literal(inside)),
+                idToPartitions, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> upperResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new EqualTo(dateSlot, new DateTimeV2Literal(upper)),
+                idToPartitions, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+
+        Assertions.assertEquals(ImmutableList.of("p1"), insideResult.partitions, timeUnit);
+        Assertions.assertEquals(ImmutableList.of(), upperResult.partitions, timeUnit);
     }
 
     private ListPartitionItem createListPartitionItem(String... values) throws AnalysisException {

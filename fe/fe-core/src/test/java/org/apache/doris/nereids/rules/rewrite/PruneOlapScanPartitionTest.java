@@ -275,6 +275,35 @@ class PruneOlapScanPartitionTest extends TestWithFeService implements MemoPatter
     }
 
     @Test
+    void testDateTruncListPartitionExpressionPrune() throws Exception {
+        String tableName = "test_date_trunc_list_partition_expression_prune";
+        createTable("create table " + tableName + "("
+                + "  id int not null,"
+                + "  dt1 datetime not null,"
+                + "  dt2 datetime not null"
+                + ") "
+                + "partition by list(date_trunc(dt1, 'day'), date_trunc(dt2, 'day')) ("
+                + "  partition p1 values in (('2026-07-23 00:00:00', '2025-07-23 00:00:00')),"
+                + "  partition p2 values in (('2026-07-24 00:00:00', '2025-07-24 00:00:00'))"
+                + ") "
+                + "distributed by hash(id) buckets 1 "
+                + "properties ('replication_num'='1')");
+
+        Database db = Env.getCurrentInternalCatalog().getDbOrMetaException("test");
+        OlapTable table = (OlapTable) db.getTableOrMetaException(tableName);
+        Assertions.assertEquals(2, table.getPartitionInfo().getPartitionExprs().size());
+
+        test(tableName,
+                "dt1 > '2026-07-23 02:00:00' and dt1 < '2026-07-23 18:00:00'"
+                        + " and dt2 > '2025-07-23 02:00:00' and dt2 < '2025-07-23 18:00:00'",
+                1);
+        test(tableName,
+                "dt1 > '2026-07-25 02:00:00' and dt1 < '2026-07-25 18:00:00'"
+                        + " and dt2 > '2025-07-25 02:00:00' and dt2 < '2025-07-25 18:00:00'",
+                0);
+    }
+
+    @Test
     void testOlapScanPartitionPruneWithNonEnumerableRange() throws Exception {
         String tableName = "testOlapScanPartitionPruneWithNonEnumerableRange";
         createTable("create table " + tableName + "("
