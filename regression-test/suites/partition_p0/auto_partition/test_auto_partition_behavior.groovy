@@ -308,18 +308,32 @@ suite("test_auto_partition_behavior") {
     assertTrue(show_result[0][1].contains("AUTO PARTITION BY RANGE"))
 
     sql "drop table if exists not_auto_expr_list"
+    sql """
+        CREATE TABLE not_auto_expr_list (
+            `TIME_STAMP` datetime NOT NULL
+        )
+        partition by list (date_trunc(`TIME_STAMP`, 'day')) (
+            partition p20201212 values in ('2020-12-12 00:00:00')
+        )
+        DISTRIBUTED BY HASH(`TIME_STAMP`) BUCKETS 10
+        PROPERTIES (
+            "replication_allocation" = "tag.location.default: 1"
+        );
+    """
+    show_result = sql "show create table not_auto_expr_list"
+    assertTrue(show_result[0][1].contains("PARTITION BY LIST (date_trunc(`TIME_STAMP`, 'day'))"))
+    assertFalse(show_result[0][1].contains("AUTO PARTITION BY LIST"))
+
+    sql """
+        alter table not_auto_expr_list
+        add partition p20201213 values in ('2020-12-13 00:00:00')
+    """
     test {
         sql """
-            CREATE TABLE not_auto_expr_list (
-                `TIME_STAMP` date NOT NULL
-            )
-            partition by list (date_trunc(`TIME_STAMP`, 'day'))()
-            DISTRIBUTED BY HASH(`TIME_STAMP`) BUCKETS 10
-            PROPERTIES (
-                "replication_allocation" = "tag.location.default: 1"
-            );
+            alter table not_auto_expr_list
+            add partition p_invalid values in ('2020-12-14 13:00:00')
         """
-        exception "auto create partition only support slotRef in list partitions"
+        exception "is not aligned with"
     }
 
     // test insert empty

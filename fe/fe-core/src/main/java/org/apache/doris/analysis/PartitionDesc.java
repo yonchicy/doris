@@ -50,6 +50,7 @@ public class PartitionDesc {
             .add("minute_floor").add("hour_floor").add("day_floor").add("month_floor").add("year_floor")
             .add("second_ceil").add("minute_ceil").add("hour_ceil").add("day_ceil").add("month_ceil").add("year_ceil")
             .build();
+    public static final String LIST_PARTITION_FUNCTION = "date_trunc";
 
     public PartitionDesc() {}
 
@@ -99,7 +100,7 @@ public class PartitionDesc {
         return partitionColNames;
     }
 
-    // 1. partition by list (column) : now support one slotRef
+    // 1. partition by list (column/date_trunc(column, unit)) : each expression maps to one slotRef
     // 2. partition by range(column/function(column)) : support slotRef and some
     // special function eg: date_trunc, date_floor/ceil
     public static List<String> getColNamesFromExpr(ArrayList<Expr> exprs, boolean isListPartition,
@@ -107,7 +108,17 @@ public class PartitionDesc {
             throws AnalysisException {
         List<String> colNames = new ArrayList<>();
         for (Expr expr : exprs) {
-            if ((expr instanceof FunctionCallExpr) && (isListPartition == false)) {
+            if (isListPartition) {
+                if (expr instanceof SlotRef) {
+                    colNames.add(((SlotRef) expr).getColumnName());
+                } else if (expr instanceof FunctionCallExpr) {
+                    colNames.add(getListPartitionColumnName((FunctionCallExpr) expr));
+                } else {
+                    throw new AnalysisException(
+                            "list partition only support slotRef and date_trunc(slotRef, stringLiteral). "
+                                    + expr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITH_TABLE));
+                }
+            } else if (expr instanceof FunctionCallExpr) {
                 FunctionCallExpr functionCallExpr = (FunctionCallExpr) expr;
                 List<Expr> paramsExpr = functionCallExpr.getParams().exprs();
                 String name = functionCallExpr.getFnName().getFunction();
@@ -129,23 +140,17 @@ public class PartitionDesc {
                                     + expr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITH_TABLE));
                 }
             } else if (expr instanceof SlotRef) {
-                if (isAutoPartition && !isListPartition) {
+                if (isAutoPartition) {
                     throw new AnalysisException(
                             "auto create partition only support date_trunc function of RANGE partition. "
                                     + expr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITH_TABLE));
                 }
                 colNames.add(((SlotRef) expr).getColumnName());
             } else {
-                if (!isListPartition) {
-                    throw new AnalysisException(
-                            "auto create partition only support slotRef and date_trunc/date_floor/date_ceil"
-                                    + "function in range partitions. "
-                                    + expr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITH_TABLE));
-                } else {
-                    throw new AnalysisException(
-                            "auto create partition only support slotRef in list partitions. "
-                                    + expr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITH_TABLE));
-                }
+                throw new AnalysisException(
+                        "auto create partition only support slotRef and date_trunc/date_floor/date_ceil"
+                                + "function in range partitions. "
+                                + expr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITH_TABLE));
             }
         }
         if (colNames.isEmpty()) {
@@ -154,6 +159,12 @@ public class PartitionDesc {
                             + exprs.get(0).accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITH_TABLE));
         }
         return colNames;
+    }
+
+    private static String getListPartitionColumnName(FunctionCallExpr functionCallExpr) throws AnalysisException {
+        PartitionExprUtil.getDateTruncTimeUnit(functionCallExpr);
+        List<Expr> arguments = functionCallExpr.getParams().exprs();
+        return ((SlotRef) arguments.get(0)).getColumnName();
     }
 
     public PartitionType getType() {
@@ -185,8 +196,8 @@ public class PartitionDesc {
         List<Expression> partitionFields = null;
 
         if (!type.name().equalsIgnoreCase(PartitionType.UNPARTITIONED.name())) {
-            // only auto partition support partition expr
-            if (!isAutoCreatePartitions) {
+            // RANGE functions imply AUTO, while LIST supports manual date_trunc expressions.
+            if (!isAutoCreatePartitions && type != PartitionType.LIST) {
                 if (partitionExprs.stream().anyMatch(expr -> expr instanceof FunctionCallExpr)) {
                     throw new org.apache.doris.nereids.exceptions.AnalysisException("Non-auto partition "
                         + "table not support partition expr!");

@@ -324,6 +324,6 @@ suite("test_auto_list_partition") {
                 "replication_num" = "1"
             );
         """
-        exception "auto create partition only support slotRef in list partitions."
+        exception "partition function should be date_trunc"
     }
 }

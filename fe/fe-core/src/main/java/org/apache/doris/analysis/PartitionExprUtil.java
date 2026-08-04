@@ -28,10 +28,16 @@ import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.util.AutoBucketCalculator;
 import org.apache.doris.common.util.PropertyAnalyzer;
+import org.apache.doris.nereids.trees.expressions.Expression;
+import org.apache.doris.nereids.trees.expressions.functions.executable.DateTimeExtractAndTransform;
+import org.apache.doris.nereids.trees.expressions.literal.DateTimeV2Literal;
+import org.apache.doris.nereids.trees.expressions.literal.VarcharLiteral;
 import org.apache.doris.nereids.trees.plans.commands.info.AddPartitionOp;
+import org.apache.doris.nereids.types.DateTimeV2Type;
 import org.apache.doris.thrift.TNullableStringLiteral;
 
 import com.google.common.base.Objects;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -40,6 +46,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -50,6 +57,51 @@ public class PartitionExprUtil {
     private static final Logger LOG = LogManager.getLogger(PartitionExprUtil.class);
     private static final PartitionExprUtil partitionExprUtil = new PartitionExprUtil();
     private static final int MAX_PARTITION_NAME_LENGTH = 50;
+    private static final Set<String> DATE_TRUNC_TIME_UNITS = ImmutableSet.of(
+            "year", "quarter", "month", "week", "day", "hour", "minute", "second");
+
+    /** Parse a legacy date_trunc(SlotRef, StringLiteral) partition expression. */
+    public static String getDateTruncTimeUnit(Expr expr) throws AnalysisException {
+        if (!(expr instanceof FunctionCallExpr)) {
+            throw new AnalysisException("date_trunc partition expr should be a function call.");
+        }
+        FunctionCallExpr functionCallExpr = (FunctionCallExpr) expr;
+        String fnName = functionCallExpr.getFnName().getFunction();
+        if (functionCallExpr.getFnName().getDb() != null
+                || !PartitionDesc.LIST_PARTITION_FUNCTION.equalsIgnoreCase(fnName)) {
+            throw new AnalysisException("partition function should be date_trunc.");
+        }
+        List<Expr> paramsExprs = functionCallExpr.getParams().exprs();
+        if (paramsExprs.size() != 2) {
+            throw new AnalysisException("date_trunc params exprs size should be 2.");
+        }
+        if (!(paramsExprs.get(0) instanceof SlotRef)) {
+            throw new AnalysisException("date_trunc first param should be slot ref.");
+        }
+        if (!(paramsExprs.get(1) instanceof StringLiteral)) {
+            throw new AnalysisException("date_trunc param of time unit is not string literal.");
+        }
+        return validateDateTruncTimeUnit(((StringLiteral) paramsExprs.get(1)).getStringValue());
+    }
+
+    /** Validate and normalize a date_trunc time unit. */
+    public static String validateDateTruncTimeUnit(String timeUnit) throws AnalysisException {
+        String normalizedTimeUnit = timeUnit.toLowerCase(Locale.ROOT);
+        if (!DATE_TRUNC_TIME_UNITS.contains(normalizedTimeUnit)) {
+            throw new AnalysisException("Unsupported date_trunc time unit: " + timeUnit);
+        }
+        return normalizedTimeUnit;
+    }
+
+    /** Return whether a concrete date value is already on its date_trunc boundary. */
+    public static boolean isDateTruncBoundary(DateLiteral dateLiteral, String timeUnit) {
+        DateTimeV2Literal value = new DateTimeV2Literal(DateTimeV2Type.of(6),
+                dateLiteral.getYear(), dateLiteral.getMonth(), dateLiteral.getDay(),
+                dateLiteral.getHour(), dateLiteral.getMinute(), dateLiteral.getSecond(),
+                dateLiteral.getMicrosecond());
+        Expression truncated = DateTimeExtractAndTransform.dateTrunc(value, new VarcharLiteral(timeUnit));
+        return value.equals(truncated);
+    }
 
     public static FunctionIntervalInfo getFunctionIntervalInfo(ArrayList<Expr> partitionExprs,
             PartitionType partitionType) throws AnalysisException {

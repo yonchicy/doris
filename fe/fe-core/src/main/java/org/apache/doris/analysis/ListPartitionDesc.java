@@ -44,13 +44,18 @@ public class ListPartitionDesc extends PartitionDesc {
 
     public ListPartitionDesc(ArrayList<Expr> exprs, List<String> partitionColNames,
             List<AllPartitionDesc> allPartitionDescs) throws AnalysisException {
+        this(exprs, partitionColNames, allPartitionDescs, true);
+    }
+
+    public ListPartitionDesc(ArrayList<Expr> exprs, List<String> partitionColNames,
+            List<AllPartitionDesc> allPartitionDescs, boolean isAutoCreatePartitions) throws AnalysisException {
         if (exprs != null) {
             this.partitionExprs = exprs;
         }
         this.partitionColNames = partitionColNames;
         this.singlePartitionDescs = handleAllPartitionDesc(allPartitionDescs);
         this.type = PartitionType.LIST;
-        this.isAutoCreatePartitions = true;
+        this.isAutoCreatePartitions = isAutoCreatePartitions;
     }
 
     @Override

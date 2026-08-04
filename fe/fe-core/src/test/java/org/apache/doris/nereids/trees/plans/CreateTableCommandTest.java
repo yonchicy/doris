@@ -748,15 +748,13 @@ public class CreateTableCommandTest extends TestWithFeService {
                 + "partition by (id, id3) () distributed by hash (id) properties (\"a\"=\"b\")");
         Assertions.assertEquals("PARTITION BY LIST(`id`, `id3`)\n(\n\n)", par.toSql());
 
-        try {
-            getCreateTableStmt("create table tb1 (id int not null, id2 int not null, id3 int not null)"
-                    + "partition by (id, func1(id2, 1), func(3,id1), id3) () "
-                    + "distributed by hash (id) properties (\"a\"=\"b\")");
-        } catch (Exception e) {
-            Assertions.assertEquals(
-                    "errCode = 2, detailMessage = auto create partition only support slotRef in list partitions. func1(`id2`, '1')",
-                    e.getMessage());
-        }
+        Exception invalidPartitionFunction = Assertions.assertThrows(Exception.class,
+                () -> getCreateTableStmt("create table tb1 (id int not null, id2 int not null, id3 int not null)"
+                        + "partition by (id, func1(id2, 1), func(3,id1), id3) () "
+                        + "distributed by hash (id) properties (\"a\"=\"b\")"));
+        Assertions.assertEquals(
+                "errCode = 2, detailMessage = partition function should be date_trunc.",
+                invalidPartitionFunction.getMessage());
 
         // NOTE: the iceberg DISTRIBUTE BY rejection moved off fe-core into IcebergConnectorMetadata.createTable
         // (SPI cutover); it is covered by fe-connector-iceberg IcebergCreateTableValidationTest.

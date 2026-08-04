@@ -17,14 +17,27 @@
 
 package org.apache.doris.nereids.trees.plans.commands.info;
 
+import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.nereids.analyzer.UnboundFunction;
 import org.apache.doris.nereids.analyzer.UnboundSlot;
 import org.apache.doris.nereids.exceptions.AnalysisException;
+import org.apache.doris.nereids.parser.NereidsParser;
 import org.apache.doris.nereids.trees.expressions.EqualTo;
 import org.apache.doris.nereids.trees.expressions.Expression;
+import org.apache.doris.nereids.trees.expressions.literal.IntegerLiteral;
 import org.apache.doris.nereids.trees.expressions.literal.NullLiteral;
 import org.apache.doris.nereids.trees.expressions.literal.StringLiteral;
+import org.apache.doris.nereids.trees.plans.commands.CreateTableCommand;
+import org.apache.doris.nereids.types.DataType;
+import org.apache.doris.nereids.types.DateTimeType;
+import org.apache.doris.nereids.types.DateTimeV2Type;
+import org.apache.doris.nereids.types.DateType;
+import org.apache.doris.nereids.types.DateV2Type;
+import org.apache.doris.nereids.types.IntegerType;
+import org.apache.doris.nereids.types.TimeStampTzType;
+import org.apache.doris.qe.ConnectContext;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -32,8 +45,138 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 public class CreateTableInfoTest {
+
+    @Test
+    public void testManualListDateTruncIsLegal() {
+        PartitionTableInfo partitionTableInfo = manualListPartition(dateTrunc("event_time"));
+        CreateTableInfo createTableInfo = createTableInfo(partitionTableInfo);
+
+        Assertions.assertDoesNotThrow(
+                () -> createTableInfo.checkLegalityOfPartitionExprs(partitionTableInfo));
+        Assertions.assertFalse(partitionTableInfo.isAutoPartition());
+    }
+
+    @Test
+    public void testParserDoesNotInferAutoForListExpression() {
+        ConnectContext previousContext = ConnectContext.get();
+        ConnectContext connectContext = new ConnectContext();
+        connectContext.setThreadLocalInfo();
+        String manualListSql = "CREATE TABLE test_list_expr (event_time DATETIME) "
+                + "PARTITION BY LIST(date_trunc(event_time, 'day')) "
+                + "(PARTITION p1 VALUES IN ('2026-07-23 00:00:00')) "
+                + "DISTRIBUTED BY HASH(event_time) BUCKETS 1";
+        String implicitAutoRangeSql = "CREATE TABLE test_range_expr (event_time DATETIME) "
+                + "PARTITION BY RANGE(date_trunc(event_time, 'day')) () "
+                + "DISTRIBUTED BY HASH(event_time) BUCKETS 1";
+        String explicitAutoListSql = "CREATE TABLE test_auto_list (event_time DATETIME) "
+                + "AUTO PARTITION BY LIST(event_time) () "
+                + "DISTRIBUTED BY HASH(event_time) BUCKETS 1";
+
+        try {
+            CreateTableCommand manualList = (CreateTableCommand) new NereidsParser().parseSingle(manualListSql);
+            CreateTableCommand implicitAutoRange = (CreateTableCommand) new NereidsParser()
+                    .parseSingle(implicitAutoRangeSql);
+            CreateTableCommand explicitAutoList = (CreateTableCommand) new NereidsParser()
+                    .parseSingle(explicitAutoListSql);
+
+            Assertions.assertFalse(manualList.getCreateTableInfo().getPartitionTableInfo().isAutoPartition());
+            Assertions.assertTrue(implicitAutoRange.getCreateTableInfo().getPartitionTableInfo().isAutoPartition());
+            Assertions.assertTrue(explicitAutoList.getCreateTableInfo().getPartitionTableInfo().isAutoPartition());
+        } finally {
+            ConnectContext.remove();
+            if (previousContext != null) {
+                previousContext.setThreadLocalInfo();
+            }
+        }
+    }
+
+    @Test
+    public void testManualListRejectsOtherPartitionFunctions() {
+        UnboundFunction dateFormat = new UnboundFunction("date_format", ImmutableList.of(
+                new UnboundSlot("event_time"), new StringLiteral("%Y-%m-%d")));
+        PartitionTableInfo partitionTableInfo = manualListPartition(dateFormat);
+
+        Assertions.assertThrows(AnalysisException.class,
+                () -> createTableInfo(partitionTableInfo).checkLegalityOfPartitionExprs(partitionTableInfo));
+    }
+
+    @Test
+    public void testManualListDateTruncRequiresCanonicalArguments() {
+        List<List<Expression>> invalidArguments = ImmutableList.of(
+                ImmutableList.of(new UnboundSlot("event_time")),
+                ImmutableList.of(
+                        new UnboundSlot("event_time"), new StringLiteral("day"), new StringLiteral("extra")),
+                ImmutableList.of(new StringLiteral("event_time"), new StringLiteral("day")),
+                ImmutableList.of(new UnboundSlot("event_time"), new UnboundSlot("day")),
+                ImmutableList.of(new UnboundSlot("event_time"), new IntegerLiteral(1)));
+
+        for (List<Expression> arguments : invalidArguments) {
+            PartitionTableInfo partitionTableInfo = manualListPartition(
+                    new UnboundFunction("date_trunc", arguments));
+            Assertions.assertThrows(AnalysisException.class,
+                    () -> validatePartitionInfo(partitionTableInfo,
+                            column("event_time", DateTimeType.INSTANCE),
+                            column("day", DateTimeType.INSTANCE)),
+                    "date_trunc arguments should be exactly (slot, string literal): " + arguments);
+        }
+    }
+
+    @Test
+    public void testManualListDateTruncRejectsInvalidTimeUnit() {
+        PartitionTableInfo partitionTableInfo = manualListPartition(
+                dateTrunc("event_time", "invalid_unit"));
+
+        Assertions.assertThrows(AnalysisException.class,
+                () -> validatePartitionInfo(
+                        partitionTableInfo, column("event_time", DateTimeType.INSTANCE)));
+    }
+
+    @Test
+    public void testManualListDateTruncAcceptsDateLikeColumns() {
+        List<DataType> dateLikeTypes = ImmutableList.of(
+                DateType.INSTANCE,
+                DateV2Type.INSTANCE,
+                DateTimeType.INSTANCE,
+                DateTimeV2Type.SYSTEM_DEFAULT,
+                TimeStampTzType.of(6));
+
+        for (DataType dateLikeType : dateLikeTypes) {
+            PartitionTableInfo partitionTableInfo = manualListPartition(dateTrunc("event_time"));
+            Assertions.assertDoesNotThrow(
+                    () -> validatePartitionInfo(partitionTableInfo, column("event_time", dateLikeType)),
+                    "date_trunc LIST partition should accept " + dateLikeType);
+        }
+    }
+
+    @Test
+    public void testManualListDateTruncRejectsNonDateColumn() {
+        PartitionTableInfo partitionTableInfo = manualListPartition(dateTrunc("event_time"));
+
+        Assertions.assertThrows(AnalysisException.class,
+                () -> validatePartitionInfo(partitionTableInfo, column("event_time", IntegerType.INSTANCE)));
+    }
+
+    @Test
+    public void testManualListExpressionColumnOrderAndManualMode() {
+        PartitionTableInfo partitionTableInfo = manualListPartition(
+                dateTrunc("event_time"),
+                new UnboundSlot("region_id"),
+                dateTrunc("created_time"));
+
+        validatePartitionInfo(partitionTableInfo,
+                column("event_time", DateTimeType.INSTANCE),
+                column("region_id", IntegerType.INSTANCE),
+                column("created_time", DateTimeV2Type.SYSTEM_DEFAULT));
+
+        Assertions.assertEquals(
+                ImmutableList.of("event_time", "region_id", "created_time"),
+                partitionTableInfo.getIdentifierPartitionColumns());
+        Assertions.assertFalse(partitionTableInfo.isAutoPartition());
+    }
 
     @Test
     public void testCheckLegalityOfPartitionExprs() {
@@ -293,5 +436,59 @@ public class CreateTableInfoTest {
         CreateTableInfo createTableInfo2 = new CreateTableInfo(false, false, false, "test_ctl", "test_db", "test_tbl", new ArrayList<>(), new ArrayList<>(), null, null, new ArrayList<>(), null, partitionTableInfo2, null, new ArrayList<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>());
         Assertions.assertThrows(AnalysisException.class, () -> createTableInfo2.checkPartitionNullity(columnDefs2, partitionTableInfo2),
                 "Can't have null partition is for NOT NULL partition column in partition expr's index 0");
+    }
+
+    private static PartitionTableInfo manualListPartition(Expression... partitionExpressions) {
+        return new PartitionTableInfo(
+                false,
+                PartitionType.LIST.name(),
+                new ArrayList<>(),
+                ImmutableList.copyOf(partitionExpressions));
+    }
+
+    private static UnboundFunction dateTrunc(String columnName) {
+        return dateTrunc(columnName, "day");
+    }
+
+    private static UnboundFunction dateTrunc(String columnName, String timeUnit) {
+        return new UnboundFunction("date_trunc", ImmutableList.of(
+                new UnboundSlot(columnName), new StringLiteral(timeUnit)));
+    }
+
+    private static ColumnDefinition column(String name, DataType dataType) {
+        return new ColumnDefinition(name, dataType, true, null, false, Optional.empty(), "");
+    }
+
+    private static void validatePartitionInfo(
+            PartitionTableInfo partitionTableInfo, ColumnDefinition... columns) {
+        partitionTableInfo.extractPartitionColumns();
+        Map<String, ColumnDefinition> columnMap = new HashMap<>();
+        for (ColumnDefinition column : columns) {
+            columnMap.put(column.getName(), column);
+        }
+        partitionTableInfo.validatePartitionInfo(
+                columnMap, new HashMap<>(), new ConnectContext(), false, false);
+    }
+
+    private static CreateTableInfo createTableInfo(PartitionTableInfo partitionTableInfo) {
+        return new CreateTableInfo(
+                false,
+                false,
+                false,
+                "test_ctl",
+                "test_db",
+                "test_tbl",
+                new ArrayList<>(),
+                new ArrayList<>(),
+                null,
+                null,
+                new ArrayList<>(),
+                null,
+                partitionTableInfo,
+                null,
+                new ArrayList<>(),
+                new HashMap<>(),
+                new HashMap<>(),
+                new ArrayList<>());
     }
 }

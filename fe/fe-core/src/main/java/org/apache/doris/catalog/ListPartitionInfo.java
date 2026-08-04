@@ -18,12 +18,18 @@
 package org.apache.doris.catalog;
 
 import org.apache.doris.analysis.AllPartitionDesc;
+import org.apache.doris.analysis.DateLiteral;
 import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.ExprToSqlVisitor;
 import org.apache.doris.analysis.ListPartitionDesc;
+import org.apache.doris.analysis.NullLiteral;
 import org.apache.doris.analysis.PartitionDesc;
+import org.apache.doris.analysis.PartitionExprUtil;
 import org.apache.doris.analysis.PartitionKeyDesc;
 import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.analysis.SinglePartitionDesc;
+import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.ToSqlParams;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.util.ListUtil;
@@ -84,6 +90,7 @@ public class ListPartitionInfo extends PartitionInfo {
         try {
             for (List<PartitionValue> values : partitionKeyDesc.getInValues()) {
                 PartitionKey partitionKey = PartitionKey.createListPartitionKey(values, partitionColumns);
+                checkDateTruncPartitionKey(partitionKey);
                 checkNewPartitionKey(partitionKey, partitionKeyDesc, isTemp);
                 if (partitionKeys.contains(partitionKey)) {
                     throw new AnalysisException("The partition key["
@@ -98,6 +105,34 @@ public class ListPartitionInfo extends PartitionInfo {
         ListPartitionItem item = new ListPartitionItem(partitionKeys);
         item.setDefaultPartition(isDefaultListPartition);
         return item;
+    }
+
+    private void checkDateTruncPartitionKey(PartitionKey partitionKey) throws AnalysisException {
+        if (partitionKey.isDefaultListPartitionKey()) {
+            return;
+        }
+        for (int i = 0; i < partitionExprs.size(); i++) {
+            Expr partitionExpr = partitionExprs.get(i);
+            if (partitionExpr instanceof SlotRef) {
+                continue;
+            }
+            String timeUnit = PartitionExprUtil.getDateTruncTimeUnit(partitionExpr);
+            if (partitionKey.getKeys().get(i) instanceof NullLiteral) {
+                continue;
+            }
+            if (!(partitionKey.getKeys().get(i) instanceof DateLiteral)) {
+                throw new AnalysisException("List partition expression "
+                        + partitionExpr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITHOUT_TABLE)
+                        + " requires a date-like partition value.");
+            }
+            DateLiteral dateLiteral = (DateLiteral) partitionKey.getKeys().get(i);
+            if (!PartitionExprUtil.isDateTruncBoundary(dateLiteral, timeUnit)) {
+                throw new AnalysisException("List partition value "
+                        + dateLiteral.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITHOUT_TABLE)
+                        + " is not aligned with "
+                        + partitionExpr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITHOUT_TABLE) + ".");
+            }
+        }
     }
 
     private void checkNewPartitionKey(PartitionKey newKey, PartitionKeyDesc keyDesc,
@@ -146,12 +181,22 @@ public class ListPartitionInfo extends PartitionInfo {
         }
         sb.append("PARTITION BY LIST (");
         int idx = 0;
-        for (Column column : partitionColumns) {
-            if (idx != 0) {
-                sb.append(", ");
+        if (partitionExprs.isEmpty()) {
+            for (Column column : partitionColumns) {
+                if (idx != 0) {
+                    sb.append(", ");
+                }
+                sb.append("`").append(column.getName()).append("`");
+                idx++;
             }
-            sb.append("`").append(column.getName()).append("`");
-            idx++;
+        } else {
+            for (Expr expr : partitionExprs) {
+                if (idx != 0) {
+                    sb.append(", ");
+                }
+                sb.append(expr.accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITHOUT_TABLE));
+                idx++;
+            }
         }
         sb.append(")\n(");
 
@@ -230,6 +275,7 @@ public class ListPartitionInfo extends PartitionInfo {
 
             allPartitionDescs.add(new SinglePartitionDesc(false, partitionName, partitionKeyDesc, properties));
         }
-        return new ListPartitionDesc(this.partitionExprs, partitionColumnNames, allPartitionDescs);
+        return new ListPartitionDesc(this.partitionExprs, partitionColumnNames,
+                allPartitionDescs, this.isAutoCreatePartitions);
     }
 }

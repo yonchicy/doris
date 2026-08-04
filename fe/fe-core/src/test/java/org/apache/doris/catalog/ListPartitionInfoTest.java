@@ -18,10 +18,16 @@
 package org.apache.doris.catalog;
 
 import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.ExprToSqlVisitor;
+import org.apache.doris.analysis.FunctionCallExpr;
+import org.apache.doris.analysis.ListPartitionDesc;
+import org.apache.doris.analysis.PartitionExprUtil;
 import org.apache.doris.analysis.PartitionKeyDesc;
 import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.analysis.SinglePartitionDesc;
 import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.StringLiteral;
+import org.apache.doris.analysis.ToSqlParams;
 import org.apache.doris.catalog.info.TableNameInfo;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
@@ -247,6 +253,92 @@ public class ListPartitionInfoTest {
 
         String expected = "AUTO PARTITION BY LIST (`k1`, `k2`)";
         Assert.assertTrue("got: " + sql + ", should have: " + expected, sql.contains(expected));
+    }
+
+    @Test
+    public void testDateTruncTimeUnits() throws AnalysisException {
+        String[] timeUnits = new String[] {
+                "year", "quarter", "month", "week", "day", "hour", "minute", "second"
+        };
+        for (String timeUnit : timeUnits) {
+            FunctionCallExpr dateTrunc = createDateTruncExpr(timeUnit);
+            Assert.assertEquals(timeUnit, PartitionExprUtil.getDateTruncTimeUnit(dateTrunc));
+        }
+        Assert.assertEquals("day", PartitionExprUtil.validateDateTruncTimeUnit("DAY"));
+        Assert.assertThrows(AnalysisException.class,
+                () -> PartitionExprUtil.validateDateTruncTimeUnit("millisecond"));
+    }
+
+    @Test
+    public void testDateTruncDayBoundary() throws AnalysisException, DdlException {
+        partitionInfo = createDateTruncPartitionInfo("day");
+
+        PartitionItem partitionItem = addListPartitionValue(partitionInfo, "2026-07-23 00:00:00");
+
+        Assert.assertEquals("2026-07-23 00:00:00",
+                ((ListPartitionItem) partitionItem).getItems().get(0).getKeys().get(0).getStringValue());
+    }
+
+    @Test
+    public void testDateTruncDayRejectsNonBoundary() throws AnalysisException {
+        partitionInfo = createDateTruncPartitionInfo("day");
+
+        DdlException exception = Assert.assertThrows(DdlException.class,
+                () -> addListPartitionValue(partitionInfo, "2026-07-23 13:00:00"));
+
+        Assert.assertTrue(exception.getMessage().contains("is not aligned with"));
+    }
+
+    @Test
+    public void testPlainListAllowsDateTruncNonBoundary() throws AnalysisException, DdlException {
+        Column k1 = new Column("k1", ScalarType.createDatetimeV2Type(0), true, null, "", "");
+        partitionColumns.add(k1);
+        partitionInfo = new ListPartitionInfo(partitionColumns);
+
+        PartitionItem partitionItem = addListPartitionValue(partitionInfo, "2026-07-23 13:00:00");
+
+        Assert.assertEquals("2026-07-23 13:00:00",
+                ((ListPartitionItem) partitionItem).getItems().get(0).getKeys().get(0).getStringValue());
+    }
+
+    @Test
+    public void testManualExprSqlAndPartitionDescRemainManual() throws AnalysisException {
+        partitionInfo = createDateTruncPartitionInfo("day");
+        OlapTable table = new OlapTable();
+
+        String sql = partitionInfo.toSql(table, null);
+        ListPartitionDesc partitionDesc = (ListPartitionDesc) partitionInfo.toPartitionDesc(table);
+
+        Assert.assertFalse(sql.startsWith("AUTO"));
+        Assert.assertTrue(sql.contains("PARTITION BY LIST (date_trunc(`k1`, 'day'))"));
+        Assert.assertFalse(partitionDesc.isAutoCreatePartitions());
+        Assert.assertEquals("date_trunc(`k1`, 'day')", partitionDesc.getPartitionExprs().get(0)
+                .accept(ExprToSqlVisitor.INSTANCE, ToSqlParams.WITHOUT_TABLE));
+    }
+
+    private ListPartitionInfo createDateTruncPartitionInfo(String timeUnit) throws AnalysisException {
+        Column k1 = new Column("k1", ScalarType.createDatetimeV2Type(0), true, null, "", "");
+        partitionColumns.add(k1);
+        ArrayList<Expr> partitionExprs = new ArrayList<>();
+        partitionExprs.add(createDateTruncExpr(timeUnit));
+        return new ListPartitionInfo(false, partitionExprs, partitionColumns);
+    }
+
+    private FunctionCallExpr createDateTruncExpr(String timeUnit) {
+        ArrayList<Expr> params = new ArrayList<>();
+        params.add(new SlotRef(new TableNameInfo("tbl"), "k1"));
+        params.add(new StringLiteral(timeUnit));
+        return new FunctionCallExpr("date_trunc", params, true);
+    }
+
+    private PartitionItem addListPartitionValue(ListPartitionInfo listPartitionInfo, String value)
+            throws AnalysisException, DdlException {
+        List<List<PartitionValue>> inValues = new ArrayList<>();
+        inValues.add(Lists.newArrayList(new PartitionValue(value)));
+        SinglePartitionDesc singlePartitionDesc = new SinglePartitionDesc(false, "p1",
+                PartitionKeyDesc.createIn(inValues), null);
+        singlePartitionDesc.analyze(1, null);
+        return listPartitionInfo.handleNewSinglePartitionDesc(singlePartitionDesc, 20000L, false);
     }
 
     @Test

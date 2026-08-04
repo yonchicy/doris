@@ -1601,11 +1601,15 @@ public class CreateTableInfo {
         List<Expression> paritionExprs = partitionTableInfo.getPartitionList();
         for (Expression expr : paritionExprs) {
             if (expr instanceof UnboundFunction) {
-                if (!partitionTableInfo.isAutoPartition()
-                        || partitionTableInfo.getPartitionType() != PartitionType.RANGE.name()) {
-                    throw new AnalysisException("only Auto Range Partition support UnboundFunction");
-                }
                 UnboundFunction func = (UnboundFunction) expr;
+                if (PartitionType.RANGE.name().equalsIgnoreCase(partitionTableInfo.getPartitionType())) {
+                    if (!partitionTableInfo.isAutoPartition()) {
+                        throw new AnalysisException("only Auto Range Partition support UnboundFunction");
+                    }
+                } else if (!PartitionType.LIST.name().equalsIgnoreCase(partitionTableInfo.getPartitionType())
+                        || !PartitionDesc.LIST_PARTITION_FUNCTION.equalsIgnoreCase(func.getName())) {
+                    throw new AnalysisException("LIST partition only support date_trunc function expression");
+                }
                 List<Expression> children = func.children();
                 for (int i = 0; i < children.size(); i++) {
                     Expression child = children.get(i);

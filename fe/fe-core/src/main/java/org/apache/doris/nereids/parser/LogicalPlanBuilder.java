@@ -4139,8 +4139,9 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
                     }
                 })
                 .collect(ImmutableList.toImmutableList());
-        // support omit 'auto' when have function expression
-        if (partitionList.stream().anyMatch(p -> p instanceof UnboundFunction)) {
+        // Keep compatibility with AUTO being omitted from RANGE function partitions.
+        // A LIST partition expression does not imply automatic partition creation.
+        if (ctx.RANGE() != null && partitionList.stream().anyMatch(p -> p instanceof UnboundFunction)) {
             isAutoPartition = true;
         }
         return new PartitionTableInfo(

@@ -22,6 +22,7 @@ import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.ListPartitionDesc;
 import org.apache.doris.analysis.PartitionDesc;
+import org.apache.doris.analysis.PartitionExprUtil;
 import org.apache.doris.analysis.RangePartitionDesc;
 import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.StringLiteral;
@@ -37,6 +38,7 @@ import org.apache.doris.nereids.trees.expressions.functions.BoundFunction;
 import org.apache.doris.nereids.trees.expressions.functions.BuiltinFunctionBuilder;
 import org.apache.doris.nereids.trees.expressions.functions.FunctionBuilder;
 import org.apache.doris.nereids.trees.expressions.literal.Literal;
+import org.apache.doris.nereids.trees.expressions.literal.StringLikeLiteral;
 import org.apache.doris.nereids.util.TypeCoercionUtils;
 import org.apache.doris.qe.ConnectContext;
 
@@ -167,13 +169,6 @@ public class PartitionTableInfo {
 
         if (identifierPartitionColumns != null) {
 
-            if (identifierPartitionColumns.size() != partitionList.size()) {
-                if (!isExternal && partitionType.equalsIgnoreCase(PartitionType.LIST.name())) {
-                    throw new AnalysisException("internal catalog does not support functions in 'LIST' partition");
-                }
-                isAutoPartition = true;
-            }
-
             identifierPartitionColumns.forEach(p -> {
                 if (!columnMap.containsKey(p)) {
                     throw new AnalysisException(
@@ -190,7 +185,7 @@ public class PartitionTableInfo {
                         "Duplicated partition column " + duplicatesKeys.get(0));
             }
 
-            validateAutoPartitionExpression(columnMap);
+            validatePartitionExpression(columnMap);
 
             if (partitionDefs != null) {
                 if (!checkPartitionsTypes()) {
@@ -220,15 +215,19 @@ public class PartitionTableInfo {
     }
 
     /**
-     * auto partition expresison should be
+     * Partition expression should be
      *   - builtin function
      *   - all arguments are column's slot or literal
      *   - after type coercion, argument should not be wrapped with cast (argument's type exact same with signature)
      */
-    private void validateAutoPartitionExpression(Map<String, ColumnDefinition> columnMap) {
+    private void validatePartitionExpression(Map<String, ColumnDefinition> columnMap) {
         for (Expression expression : partitionList) {
             if (expression instanceof UnboundFunction) {
                 UnboundFunction unboundFunction = (UnboundFunction) expression;
+                if (partitionType.equalsIgnoreCase(PartitionType.LIST.name())) {
+                    validateListPartitionExpression(unboundFunction, columnMap);
+                    continue;
+                }
                 List<Expression> mockedArguments = unboundFunction.getArguments()
                         .stream()
                         .map(a -> {
@@ -280,6 +279,28 @@ public class PartitionTableInfo {
         }
     }
 
+    private void validateListPartitionExpression(UnboundFunction function,
+            Map<String, ColumnDefinition> columnMap) {
+        List<Expression> arguments = function.getArguments();
+        if (function.getDbName() != null
+                || !PartitionDesc.LIST_PARTITION_FUNCTION.equalsIgnoreCase(function.getName())
+                || arguments.size() != 2
+                || !(arguments.get(0) instanceof UnboundSlot)
+                || !(arguments.get(1) instanceof StringLikeLiteral)) {
+            throw new AnalysisException("partition expr " + function.toSql() + " is illegal!");
+        }
+        ColumnDefinition partitionColumn = columnMap.get(((UnboundSlot) arguments.get(0)).getName());
+        if (partitionColumn == null || !partitionColumn.getType().isDateLikeType()) {
+            throw new AnalysisException("partition expr " + function.toSql() + " is illegal!");
+        }
+        try {
+            PartitionExprUtil.validateDateTruncTimeUnit(
+                    ((StringLikeLiteral) arguments.get(1)).getStringValue());
+        } catch (org.apache.doris.common.AnalysisException e) {
+            throw new AnalysisException("partition expr " + function.toSql() + " is illegal!");
+        }
+    }
+
     /**
      *  Convert to PartitionDesc types.
      */
@@ -307,8 +328,8 @@ public class PartitionTableInfo {
 
             ArrayList<Expr> exprs = convertToLegacyAutoPartitionExprs(partitionList);
 
-            // only auto partition support partition expr
-            if (!isAutoPartition) {
+            // RANGE functions imply AUTO, while LIST supports manual date_trunc expressions.
+            if (!isAutoPartition && !partitionType.equalsIgnoreCase(PartitionType.LIST.name())) {
                 if (exprs.stream().anyMatch(expr -> expr instanceof FunctionCallExpr)) {
                     throw new AnalysisException("Non-auto partition table not support partition expr!");
                 }
@@ -322,11 +343,8 @@ public class PartitionTableInfo {
                         partitionDesc = new RangePartitionDesc(identifierPartitionColumns, partitionDescs);
                     }
                 } else {
-                    if (isAutoPartition) {
-                        partitionDesc = new ListPartitionDesc(exprs, identifierPartitionColumns, partitionDescs);
-                    } else {
-                        partitionDesc = new ListPartitionDesc(identifierPartitionColumns, partitionDescs);
-                    }
+                    partitionDesc = new ListPartitionDesc(exprs, identifierPartitionColumns, partitionDescs,
+                            isAutoPartition);
                 }
             } catch (Exception e) {
                 throw new AnalysisException(e.getMessage(), e.getCause());
