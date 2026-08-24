@@ -21,7 +21,7 @@ import org.apache.doris.analysis.DateLiteral;
 import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.LiteralExpr;
-import org.apache.doris.analysis.StringLiteral;
+import org.apache.doris.analysis.PartitionExprUtil;
 import org.apache.doris.catalog.ListPartitionItem;
 import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.common.Pair;
@@ -42,7 +42,6 @@ import com.google.common.collect.ImmutableMap;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.IntStream;
@@ -104,8 +103,7 @@ public class OneListPartitionEvaluator<K>
                 Literal literal = Literal.fromLegacyLiteral(legacyLiteral, legacyLiteral.getType());
                 Expr partitionExpr = partitionExprs.get(i);
                 if (isDateTrunc(partitionExpr)) {
-                    ColumnRange range = getDateTruncRange((DateLiteral) legacyLiteral,
-                            (FunctionCallExpr) partitionExpr);
+                    ColumnRange range = getDateTruncRange((DateLiteral) legacyLiteral, partitionExpr);
                     inputBuilder.put(partitionSlot, new PartitionSlotInput(partitionSlot,
                             ImmutableMap.of(partitionSlot, range)));
                 } else {
@@ -123,45 +121,15 @@ public class OneListPartitionEvaluator<K>
                 && ((FunctionCallExpr) partitionExpr).getFnName().getFunction().equalsIgnoreCase("date_trunc");
     }
 
-    private ColumnRange getDateTruncRange(DateLiteral lower, FunctionCallExpr dateTrunc) {
-        String timeUnit = ((StringLiteral) dateTrunc.getParams().exprs().get(1))
-                .getStringValue().toLowerCase(Locale.ROOT);
-        DateLiteral upper;
+    private ColumnRange getDateTruncRange(DateLiteral lower, Expr dateTrunc) {
         try {
-            switch (timeUnit) {
-                case "year":
-                    upper = lower.plusYears(1);
-                    break;
-                case "quarter":
-                    upper = lower.plusMonths(3);
-                    break;
-                case "month":
-                    upper = lower.plusMonths(1);
-                    break;
-                case "week":
-                    upper = lower.plusDays(7);
-                    break;
-                case "day":
-                    upper = lower.plusDays(1);
-                    break;
-                case "hour":
-                    upper = lower.plusHours(1);
-                    break;
-                case "minute":
-                    upper = lower.plusMinutes(1);
-                    break;
-                case "second":
-                    upper = lower.plusSeconds(1);
-                    break;
-                default:
-                    throw new AnalysisException("Unsupported date_trunc time unit: " + timeUnit);
-            }
+            DateLiteral upper = PartitionExprUtil.getDateTruncRangeEnd(lower, dateTrunc);
+            Literal lowerLiteral = Literal.fromLegacyLiteral(lower, lower.getType());
+            Literal upperLiteral = Literal.fromLegacyLiteral(upper, upper.getType());
+            return ColumnRange.range(lowerLiteral, BoundType.CLOSED, upperLiteral, BoundType.OPEN);
         } catch (org.apache.doris.common.AnalysisException e) {
             throw new AnalysisException(e.getMessage(), e);
         }
-        Literal lowerLiteral = Literal.fromLegacyLiteral(lower, lower.getType());
-        Literal upperLiteral = Literal.fromLegacyLiteral(upper, upper.getType());
-        return ColumnRange.range(lowerLiteral, BoundType.CLOSED, upperLiteral, BoundType.OPEN);
     }
 
     private List<Map<Slot, PartitionSlotInput>> getInputsByOneSlot() {

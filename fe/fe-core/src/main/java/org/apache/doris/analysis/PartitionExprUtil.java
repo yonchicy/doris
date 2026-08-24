@@ -84,6 +84,12 @@ public class PartitionExprUtil {
         return validateDateTruncTimeUnit(((StringLiteral) paramsExprs.get(1)).getStringValue());
     }
 
+    /** Get the exclusive upper bound of a DATE_TRUNC partition value. */
+    public static DateLiteral getDateTruncRangeEnd(DateLiteral beginTime, Expr partitionExpr)
+            throws AnalysisException {
+        return getRangeEnd(beginTime, getDateTruncTimeUnit(partitionExpr), 1);
+    }
+
     /** Validate and normalize a date_trunc time unit. */
     public static String validateDateTruncTimeUnit(String timeUnit) throws AnalysisException {
         String normalizedTimeUnit = timeUnit.toLowerCase(Locale.ROOT);
@@ -152,8 +158,11 @@ public class PartitionExprUtil {
 
     public static DateLiteral getRangeEnd(DateLiteral beginTime, FunctionIntervalInfo intervalInfo)
             throws AnalysisException {
-        String timeUnit = intervalInfo.timeUnit;
-        long interval = intervalInfo.interval;
+        return getRangeEnd(beginTime, intervalInfo.timeUnit, intervalInfo.interval);
+    }
+
+    private static DateLiteral getRangeEnd(DateLiteral beginTime, String timeUnit, long interval)
+            throws AnalysisException {
         switch (timeUnit) {
             case "year":
                 return beginTime.plusYears(interval);

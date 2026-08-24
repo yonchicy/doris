@@ -17,6 +17,8 @@
 
 package org.apache.doris.catalog;
 
+import org.apache.doris.analysis.DateLiteral;
+import org.apache.doris.analysis.DateLiteralUtils;
 import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.ExprToSqlVisitor;
 import org.apache.doris.analysis.FunctionCallExpr;
@@ -272,6 +274,18 @@ public class ListPartitionInfoTest {
     }
 
     @Test
+    public void testDateTruncRangeEnds() throws AnalysisException {
+        assertDateTruncRangeEnd("year", "2026-01-01 00:00:00", "2027-01-01 00:00:00");
+        assertDateTruncRangeEnd("quarter", "2026-07-01 00:00:00", "2026-10-01 00:00:00");
+        assertDateTruncRangeEnd("month", "2026-07-01 00:00:00", "2026-08-01 00:00:00");
+        assertDateTruncRangeEnd("week", "2026-07-20 00:00:00", "2026-07-27 00:00:00");
+        assertDateTruncRangeEnd("DAY", "2026-07-23 00:00:00", "2026-07-24 00:00:00");
+        assertDateTruncRangeEnd("hour", "2026-07-23 16:00:00", "2026-07-23 17:00:00");
+        assertDateTruncRangeEnd("minute", "2026-07-23 16:45:00", "2026-07-23 16:46:00");
+        assertDateTruncRangeEnd("second", "2026-07-23 16:45:30", "2026-07-23 16:45:31");
+    }
+
+    @Test
     public void testDateTruncPartitionValueBoundaries() throws AnalysisException, DdlException {
         assertDateTruncPartitionValueBoundary(
                 "year", "2026-01-01 00:00:00", "2026-04-01 00:00:00", 0);
@@ -362,6 +376,13 @@ public class ListPartitionInfoTest {
                 () -> addListPartitionValue(nonAlignedPartitionInfo, nonAlignedValue));
         Assert.assertTrue(exception.getMessage(), exception.getMessage().contains(
                 "is not aligned with date_trunc(`k1`, '" + timeUnit + "')"));
+    }
+
+    private void assertDateTruncRangeEnd(String timeUnit, String lowerValue, String expectedUpperValue)
+            throws AnalysisException {
+        DateLiteral lower = DateLiteralUtils.createDateLiteral(lowerValue, ScalarType.createDatetimeV2Type(0));
+        DateLiteral upper = PartitionExprUtil.getDateTruncRangeEnd(lower, createDateTruncExpr(timeUnit));
+        Assert.assertEquals(timeUnit, expectedUpperValue, upper.getStringValue());
     }
 
     private FunctionCallExpr createDateTruncExpr(String timeUnit) {
