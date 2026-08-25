@@ -387,7 +387,12 @@ public class InsertOverwriteTableCommand extends Command implements NeedAuditEnc
                     (LogicalPlan) (sink.child(0)));
             // 1. when overwrite table, allow auto partition or not is controlled by session variable.
             // 2. we save and pass overwrite auto detect by insertCtx
-            boolean allowAutoPartition = wholeTable && ctx.getSessionVariable().isEnableAutoCreateWhenOverwrite();
+            // 3. a materialized view inherits the partition expression of an expression partitioned
+            //    base table, whose write routing requires the automatic partition mode, so it is
+            //    always allowed
+            TableIf targetTable = InsertUtils.getTargetTable(logicalQuery, ctx);
+            boolean allowAutoPartition = targetTable instanceof MTMV
+                    || (wholeTable && ctx.getSessionVariable().isEnableAutoCreateWhenOverwrite());
             insertCtx = new OlapInsertCommandContext(allowAutoPartition, true);
         } else if (logicalQuery instanceof UnboundConnectorTableSink) {
             UnboundConnectorTableSink<?> sink = (UnboundConnectorTableSink<?>) logicalQuery;

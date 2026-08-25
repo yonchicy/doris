@@ -23,6 +23,9 @@ import org.apache.doris.analysis.PartitionExprUtil;
 import org.apache.doris.analysis.PartitionKeyDesc;
 import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.analysis.StringLiteral;
+import org.apache.doris.catalog.ListPartitionInfo;
+import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.PartitionInfo;
 import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
@@ -43,6 +46,7 @@ import com.google.common.collect.ImmutableSet;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -75,18 +79,72 @@ public class MTMVPartitionExprDateTrunc implements MTMVPartitionExprService {
         for (BaseColInfo pctInfo : pctInfos) {
             MTMVRelatedTableIf pctTable = MTMVUtil.getRelatedTable(pctInfo.getTableInfo());
             PartitionType partitionType = pctTable.getPartitionType(MvccUtil.getSnapshotFromContext(pctTable));
-            if (partitionType == PartitionType.RANGE) {
-                Type partitionColumnType = MTMVPartitionUtil
-                        .getPartitionColumnType(pctTable, pctInfo.getColName());
-                if (!partitionColumnType.isDateType()) {
-                    throw new AnalysisException(
-                            "partitionColumnType should be date/datetime "
-                                    + "when PartitionType is range and expr is date_trunc");
-                }
-            } else {
-                throw new AnalysisException("date_trunc only support range partition");
+            if (partitionType != PartitionType.RANGE && partitionType != PartitionType.LIST) {
+                throw new AnalysisException("date_trunc only support range/list partition");
+            }
+            Type partitionColumnType = MTMVPartitionUtil
+                    .getPartitionColumnType(pctTable, pctInfo.getColName());
+            if (!partitionColumnType.isDateType()) {
+                throw new AnalysisException(
+                        "partitionColumnType should be date/datetime "
+                                + "when PartitionType is range/list and expr is date_trunc");
+            }
+            if (partitionType == PartitionType.LIST) {
+                checkListExprPartitionGranularity(pctTable, mvPartitionInfo);
             }
         }
+    }
+
+    private void checkListExprPartitionGranularity(MTMVRelatedTableIf pctTable,
+            MTMVPartitionInfo mvPartitionInfo) throws AnalysisException {
+        if (!(pctTable instanceof OlapTable)) {
+            return;
+        }
+        PartitionInfo partitionInfo = ((OlapTable) pctTable).getPartitionInfo();
+        if (!(partitionInfo instanceof ListPartitionInfo)) {
+            return;
+        }
+        List<Expr> partitionExprs = partitionInfo.getPartitionExprs();
+        if (partitionExprs.isEmpty()) {
+            return;
+        }
+        int pctColPos = mvPartitionInfo.getPctColPos(pctTable);
+        if (pctColPos >= partitionExprs.size()) {
+            return;
+        }
+        Expr pctPartitionExpr = partitionExprs.get(pctColPos);
+        if (!(pctPartitionExpr instanceof FunctionCallExpr)) {
+            return;
+        }
+        String baseTimeUnit = PartitionExprUtil.getDateTruncTimeUnit(pctPartitionExpr);
+        if (!isAlignedRollup(baseTimeUnit, this.timeUnit)) {
+            throw new AnalysisException(String.format(
+                    "Materialized view date_trunc granularity '%s' can not roll up from "
+                            + "base table list partition date_trunc granularity '%s', "
+                            + "allowed rollup chains: hour->day->week, hour->day->month->quarter->year",
+                    this.timeUnit, baseTimeUnit));
+        }
+    }
+
+    private static boolean isAlignedRollup(String baseTimeUnit, String mvTimeUnit) {
+        if (baseTimeUnit.equalsIgnoreCase(mvTimeUnit)) {
+            return true;
+        }
+        Set<String> allowedCoarser = ALIGNED_ROLLUP_GRAPH.get(baseTimeUnit.toLowerCase());
+        return allowedCoarser != null && allowedCoarser.contains(mvTimeUnit.toLowerCase());
+    }
+
+    private static final Map<String, Set<String>> ALIGNED_ROLLUP_GRAPH = createAlignedRollupGraph();
+
+    private static Map<String, Set<String>> createAlignedRollupGraph() {
+        Map<String, Set<String>> graph = new HashMap<>();
+        graph.put("hour", ImmutableSet.of("day", "week", "month", "quarter", "year"));
+        graph.put("day", ImmutableSet.of("week", "month", "quarter", "year"));
+        graph.put("week", ImmutableSet.of());
+        graph.put("month", ImmutableSet.of("quarter", "year"));
+        graph.put("quarter", ImmutableSet.of("year"));
+        graph.put("year", ImmutableSet.of());
+        return Collections.unmodifiableMap(graph);
     }
 
     @Override

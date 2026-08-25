@@ -158,13 +158,6 @@ public class OneRangePartitionEvaluator<K>
         this.inputs = Utils.allCombinations(expandInputs);
     }
 
-    static <K> OneRangePartitionEvaluator<K> forIndependentRanges(K partitionIdent, List<Slot> partitionSlots,
-            List<Map<Slot, PartitionSlotInput>> independentRangeInputs, CascadesContext cascadesContext,
-            boolean defaultPartition) {
-        return new OneRangePartitionEvaluator<>(partitionIdent, partitionSlots, independentRangeInputs,
-                cascadesContext, defaultPartition);
-    }
-
     private OneRangePartitionEvaluator(K partitionIdent, List<Slot> partitionSlots,
             List<Map<Slot, PartitionSlotInput>> independentRangeInputs, CascadesContext cascadesContext,
             boolean defaultPartition) {
@@ -182,6 +175,13 @@ public class OneRangePartitionEvaluator<K>
         this.independentRangeInputs = independentRangeInputs.stream()
                 .map(this::fillSlotRangesToInputs)
                 .collect(ImmutableList.toImmutableList());
+    }
+
+    static <K> OneRangePartitionEvaluator<K> forIndependentRanges(K partitionIdent, List<Slot> partitionSlots,
+            List<Map<Slot, PartitionSlotInput>> independentRangeInputs, CascadesContext cascadesContext,
+            boolean defaultPartition) {
+        return new OneRangePartitionEvaluator<>(partitionIdent, partitionSlots, independentRangeInputs,
+                cascadesContext, defaultPartition);
     }
 
     @Override

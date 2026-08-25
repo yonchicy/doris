@@ -18,12 +18,17 @@
 package org.apache.doris.nereids.trees.plans.commands.info;
 
 import org.apache.doris.analysis.AllPartitionDesc;
+import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.ListPartitionDesc;
 import org.apache.doris.analysis.PartitionDesc;
 import org.apache.doris.analysis.RangePartitionDesc;
+import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.KeysType;
+import org.apache.doris.catalog.ListPartitionInfo;
+import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.PartitionInfo;
 import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.catalog.info.TableNameInfo;
 import org.apache.doris.common.ErrorCode;
@@ -62,6 +67,8 @@ import com.google.common.collect.Maps;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -258,6 +265,13 @@ public class CreateMTMVInfo extends CreateTableInfo {
                 return new RangePartitionDesc(Lists.newArrayList(mvPartitionInfo.getPartitionCol()),
                         allPartitionDescs);
             } else if (type == PartitionType.LIST) {
+                ArrayList<Expr> pctPartitionExprs = getPctPartitionExprs(relatedTable);
+                if (pctPartitionExprs != null) {
+                    // inherit the partition expression of the LIST expression partitioned base table,
+                    // so that the write routing computes the partition key by the expression
+                    return new ListPartitionDesc(pctPartitionExprs,
+                            Lists.newArrayList(mvPartitionInfo.getPartitionCol()), allPartitionDescs, true);
+                }
                 return new ListPartitionDesc(Lists.newArrayList(mvPartitionInfo.getPartitionCol()),
                         allPartitionDescs);
             } else {
@@ -266,6 +280,36 @@ public class CreateMTMVInfo extends CreateTableInfo {
         } catch (org.apache.doris.common.AnalysisException e) {
             throw new AnalysisException(e.getMessage(), e);
         }
+    }
+
+    /**
+     * Get the partition expressions of the pct column from a LIST expression partitioned base
+     * table, so that the mv inherits the partition expression and its write routing matches the
+     * base partition semantics. Return null when the related table has no partition expression.
+     */
+    private ArrayList<Expr> getPctPartitionExprs(MTMVRelatedTableIf relatedTable)
+            throws org.apache.doris.common.AnalysisException {
+        if (!(relatedTable instanceof OlapTable)) {
+            return null;
+        }
+        PartitionInfo partitionInfo = ((OlapTable) relatedTable).getPartitionInfo();
+        if (!(partitionInfo instanceof ListPartitionInfo)) {
+            return null;
+        }
+        List<Expr> partitionExprs = partitionInfo.getPartitionExprs();
+        if (partitionExprs.isEmpty()) {
+            return null;
+        }
+        int pctColPos = mvPartitionInfo.getPctColPos(relatedTable);
+        if (pctColPos >= partitionExprs.size()) {
+            return null;
+        }
+        Expr pctPartitionExpr = partitionExprs.get(pctColPos);
+        if (pctPartitionExpr instanceof SlotRef) {
+            // ordinary list partition column without expression
+            return null;
+        }
+        return new ArrayList<>(Collections.singletonList(pctPartitionExpr));
     }
 
     /**
@@ -288,6 +332,11 @@ public class CreateMTMVInfo extends CreateTableInfo {
         this.setSortOrderFields(Lists.newArrayList());
         this.setIndexes(Lists.newArrayList());
 
+        // extract partition column names from partition fields before analyzeEngine() rebuilds
+        // the partition desc, because the PartitionTableInfo constructor only extracts plain
+        // slot columns and drops expression fields such as date_trunc
+        getPartitionTableInfo().extractPartitionColumns();
+
         this.analyzeEngine();
 
         validatePartitionInfo(ctx);
@@ -306,6 +355,8 @@ public class CreateMTMVInfo extends CreateTableInfo {
             }
         });
 
+        // validate partition columns and partition expressions, column names were already
+        // extracted before analyzeEngine() rebuilt the partition desc
         getPartitionTableInfo().validatePartitionInfo(
                 columnMap,
                 properties,
