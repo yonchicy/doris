@@ -104,7 +104,7 @@ public class MTMVRelatedPartitionDescRollUpGeneratorTest {
             Map<PartitionKeyDesc, Set<String>> res = generator.rollUpList(relatedPartitionDescs,
                     mtmvPartitionInfo, Maps.newHashMap());
 
-            PartitionKeyDesc expectDesc202001 = generateInDesc("2020-01-01", "2020-01-02");
+            PartitionKeyDesc expectDesc202001 = generateInDesc("2020-01-01");
             PartitionKeyDesc expectDesc202002 = generateInDesc("2020-02-01");
             Assert.assertEquals(2, res.size());
             Assert.assertEquals(Sets.newHashSet("name1", "name2"), res.get(expectDesc202001));

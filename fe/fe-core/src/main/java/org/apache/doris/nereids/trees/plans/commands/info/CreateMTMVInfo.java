@@ -265,11 +265,9 @@ public class CreateMTMVInfo extends CreateTableInfo {
                 return new RangePartitionDesc(Lists.newArrayList(mvPartitionInfo.getPartitionCol()),
                         allPartitionDescs);
             } else if (type == PartitionType.LIST) {
-                ArrayList<Expr> pctPartitionExprs = getPctPartitionExprs(relatedTable);
-                if (pctPartitionExprs != null) {
-                    // inherit the partition expression of the LIST expression partitioned base table,
-                    // so that the write routing computes the partition key by the expression
-                    return new ListPartitionDesc(pctPartitionExprs,
+                ArrayList<Expr> partitionExprs = getMvPartitionExprs(relatedTable);
+                if (partitionExprs != null) {
+                    return new ListPartitionDesc(partitionExprs,
                             Lists.newArrayList(mvPartitionInfo.getPartitionCol()), allPartitionDescs, true);
                 }
                 return new ListPartitionDesc(Lists.newArrayList(mvPartitionInfo.getPartitionCol()),
@@ -280,6 +278,22 @@ public class CreateMTMVInfo extends CreateTableInfo {
         } catch (org.apache.doris.common.AnalysisException e) {
             throw new AnalysisException(e.getMessage(), e);
         }
+    }
+
+    /**
+     * Get the partition expressions for the MTMV. If the MTMV has its own rollup expr
+     * (i.e. partition type is EXPR), use that expr so that both rollup and query-time
+     * partition pruning operate on the MTMV's partition granularity. Otherwise, inherit
+     * the partition expression of the LIST expression partitioned base table so that
+     * write routing matches the base partition semantics. Return null when no partition
+     * expression is available.
+     */
+    private ArrayList<Expr> getMvPartitionExprs(MTMVRelatedTableIf relatedTable)
+            throws org.apache.doris.common.AnalysisException {
+        if (mvPartitionInfo.getExpr() != null) {
+            return new ArrayList<>(Collections.singletonList(mvPartitionInfo.getExpr()));
+        }
+        return getPctPartitionExprs(relatedTable);
     }
 
     /**

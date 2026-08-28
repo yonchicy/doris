@@ -30,6 +30,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -72,10 +73,10 @@ public class MTMVRelatedPartitionDescRollUpGenerator implements MTMVRelatedParti
      * when related table has 3 partitions:(20200101),(20200102),(20200201)
      * <p>
      * if expr is `date_trunc(month)`
-     * then,MTMV will have 2 partitions (20200101,20200102),(20200201)
+     * then,MTMV will have 2 partitions (20200101),(20200201)
      * <p>
      * if expr is `date_trunc(year)`
-     * then,MTMV will have 1 partitions (20200101,20200102,20200201)
+     * then,MTMV will have 1 partitions (20200101)
      *
      * @param relatedPartitionDescs
      * @param mvPartitionInfo
@@ -84,44 +85,22 @@ public class MTMVRelatedPartitionDescRollUpGenerator implements MTMVRelatedParti
      */
     public Map<PartitionKeyDesc, Set<String>> rollUpList(Map<PartitionKeyDesc, Set<String>> relatedPartitionDescs,
             MTMVPartitionInfo mvPartitionInfo, Map<String, String> mvProperties) throws AnalysisException {
-        Map<String, Set<String>> identityToValues = Maps.newHashMap();
         Map<String, Set<String>> identityToPartitionNames = Maps.newHashMap();
         MTMVPartitionExprService exprSerice = MTMVPartitionExprFactory.getExprService(mvPartitionInfo.getExpr());
 
         for (Entry<PartitionKeyDesc, Set<String>> entry : relatedPartitionDescs.entrySet()) {
             String rollUpIdentity = exprSerice.getRollUpIdentity(entry.getKey(), mvProperties);
             Preconditions.checkNotNull(rollUpIdentity);
-            if (identityToValues.containsKey(rollUpIdentity)) {
-                identityToValues.get(rollUpIdentity).addAll(getStringValues(entry.getKey()));
-                identityToPartitionNames.get(rollUpIdentity).addAll(entry.getValue());
-            } else {
-                identityToValues.put(rollUpIdentity, getStringValues(entry.getKey()));
-                identityToPartitionNames.put(rollUpIdentity, entry.getValue());
-            }
+            identityToPartitionNames.computeIfAbsent(rollUpIdentity, k -> Sets.newHashSet())
+                    .addAll(entry.getValue());
         }
         Map<PartitionKeyDesc, Set<String>> result = Maps.newHashMap();
-        for (Entry<String, Set<String>> entry : identityToValues.entrySet()) {
-            result.put(PartitionKeyDesc.createIn(getPartitionValues(entry.getValue())),
-                    identityToPartitionNames.get(entry.getKey()));
+        for (Entry<String, Set<String>> entry : identityToPartitionNames.entrySet()) {
+            result.put(PartitionKeyDesc.createIn(
+                            Collections.singletonList(Lists.newArrayList(new PartitionValue(entry.getKey())))),
+                    entry.getValue());
         }
         return result;
-    }
-
-    private List<List<PartitionValue>> getPartitionValues(Set<String> strings) {
-        List<List<PartitionValue>> inValues = Lists.newArrayList();
-        for (String value : strings) {
-            inValues.add(Lists.newArrayList(new PartitionValue(value)));
-        }
-        return inValues;
-    }
-
-    private Set<String> getStringValues(PartitionKeyDesc partitionKeyDesc) {
-        List<List<PartitionValue>> inValues = partitionKeyDesc.getInValues();
-        Set<String> res = Sets.newHashSet();
-        for (List<PartitionValue> list : inValues) {
-            res.add(list.get(0).getStringValue());
-        }
-        return res;
     }
 
     /**

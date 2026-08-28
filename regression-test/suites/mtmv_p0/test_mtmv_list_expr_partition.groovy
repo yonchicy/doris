@@ -88,10 +88,10 @@ suite("test_mtmv_list_expr_partition", "mtmv") {
 
     def rollupPartitions = sql """show partitions from ${mvName}"""
     logger.info("rollupPartitions: " + rollupPartitions.toString())
-    // LIST rollup groups all three day values into a single MV list partition,
-    // whose name is the concatenation of the discrete in-values (not a month boundary).
+    // LIST rollup truncates each day value to month granularity,
+    // producing a single MV list partition named after the month boundary.
     assertEquals(1, rollupPartitions.size())
-    assertTrue(rollupPartitions.toString().contains("p_20260725000000_20260724000000_20260723000000"))
+    assertTrue(rollupPartitions.toString().contains("p_20260701000000"))
 
     sql """REFRESH MATERIALIZED VIEW ${mvName} AUTO"""
     waitingMTMVTaskFinishedByMvName(mvName)
