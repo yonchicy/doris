@@ -131,6 +131,49 @@ public class QueryCacheNormalizerTest extends TestWithFeService {
                 + "distributed by hash(k1) buckets 3\n"
                 + "properties('replication_num' = '1', 'enable_unique_key_merge_on_write' = 'false')";
 
+        String listRegionTable = "create table db1.list_region("
+                + "  region varchar(32),\n"
+                + "  k1 int,\n"
+                + "  v1 int)\n"
+                + "DUPLICATE KEY(region, k1)\n"
+                + "PARTITION BY LIST(region)\n"
+                + "(\n"
+                + "  PARTITION p_us VALUES IN (\"us\"),\n"
+                + "  PARTITION p_eu VALUES IN (\"eu\"),\n"
+                + "  PARTITION p_ap VALUES IN (\"ap\")\n"
+                + ")\n"
+                + "distributed by hash(k1) buckets 3\n"
+                + "properties('replication_num' = '1')";
+
+        String listMonthTable = "create table db1.list_month("
+                + "  dt datetime,\n"
+                + "  k1 int,\n"
+                + "  v1 int)\n"
+                + "DUPLICATE KEY(dt, k1)\n"
+                + "PARTITION BY LIST(date_trunc(dt, 'month'))\n"
+                + "(\n"
+                + "  PARTITION p202403 VALUES IN ('2024-03-01 00:00:00'),\n"
+                + "  PARTITION p202404 VALUES IN ('2024-04-01 00:00:00'),\n"
+                + "  PARTITION p202405 VALUES IN ('2024-05-01 00:00:00')\n"
+                + ")\n"
+                + "distributed by hash(k1) buckets 3\n"
+                + "properties('replication_num' = '1')";
+
+        String listMultiTable = "create table db1.list_multi("
+                + "  dt datetime,\n"
+                + "  region varchar(32),\n"
+                + "  k1 int,\n"
+                + "  v1 int)\n"
+                + "DUPLICATE KEY(dt, region, k1)\n"
+                + "PARTITION BY LIST(date_trunc(dt, 'month'), region)\n"
+                + "(\n"
+                + "  PARTITION p_us_03 VALUES IN (('2024-03-01 00:00:00','us')),\n"
+                + "  PARTITION p_eu_03 VALUES IN (('2024-03-01 00:00:00','eu')),\n"
+                + "  PARTITION p_us_04 VALUES IN (('2024-04-01 00:00:00','us'))\n"
+                + ")\n"
+                + "distributed by hash(k1) buckets 3\n"
+                + "properties('replication_num' = '1')";
+
         String aggTable = "create table db1.agg_tbl("
                 + "  k1 int,\n"
                 + "  v1 int sum)\n"
@@ -139,7 +182,7 @@ public class QueryCacheNormalizerTest extends TestWithFeService {
                 + "properties('replication_num' = '1')";
 
         createTables(nonPart, part1, part2, multiLeveParts, variantTable, uniqueMowTable,
-                uniqueMorTable, aggTable);
+                uniqueMorTable, aggTable, listRegionTable, listMonthTable, listMultiTable);
 
         connectContext.getSessionVariable().setDisableNereidsRules("PRUNE_EMPTY_PARTITION");
         connectContext.getSessionVariable().setEnableQueryCache(true);
@@ -468,6 +511,95 @@ public class QueryCacheNormalizerTest extends TestWithFeService {
         } finally {
             connectContext.getSessionVariable().setEnableQueryCacheIncremental(false);
         }
+    }
+
+    @Test
+    public void testListDiscretePartition() throws Throwable {
+        // discrete list partition: equivalent predicates on the partition column are extracted
+        // out of the digest and encoded into the tablet_to_range, so they share the digest.
+        TQueryCacheParam noFilter = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_region group by k1");
+        TQueryCacheParam eq = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_region where region = 'us' group by k1");
+        TQueryCacheParam in = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_region where region in ('us') group by k1");
+        Assertions.assertEquals(noFilter.digest, eq.digest);
+        Assertions.assertEquals(eq.digest, in.digest);
+        Assertions.assertEquals(eq.tablet_to_range, in.tablet_to_range);
+
+        // a different discrete value keeps the same digest but produces a different range.
+        TQueryCacheParam eu = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_region where region = 'eu' group by k1");
+        Assertions.assertEquals(eq.digest, eu.digest);
+        Assertions.assertNotEquals(
+                Lists.newArrayList(eq.tablet_to_range.values()),
+                Lists.newArrayList(eu.tablet_to_range.values()));
+
+        // a predicate on the non partition column is not extracted and stays in the digest.
+        TQueryCacheParam nonPart1 = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_region where k1 = 1 group by k1");
+        TQueryCacheParam nonPart2 = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_region where k1 = 2 group by k1");
+        Assertions.assertNotEquals(noFilter.digest, nonPart1.digest);
+        Assertions.assertNotEquals(nonPart1.digest, nonPart2.digest);
+    }
+
+    @Test
+    public void testListDateTruncPartition() throws Throwable {
+        // date_trunc list partition: the boundary maps to a closed-open range on the base
+        // column. `<= last second` and `< next boundary` are equivalent after closed-open
+        // normalization, so they share both the digest and the range.
+        TQueryCacheParam le = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_month "
+                        + "where dt >= '2024-03-15 00:00:00' and dt <= '2024-03-31 23:59:59' group by k1");
+        TQueryCacheParam lt = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_month "
+                        + "where dt >= '2024-03-15 00:00:00' and dt < '2024-04-01 00:00:00' group by k1");
+        Assertions.assertEquals(le.digest, lt.digest);
+        Assertions.assertEquals(le.tablet_to_range, lt.tablet_to_range);
+
+        // a narrower predicate on the same partition shares the digest but narrows the range.
+        TQueryCacheParam narrower = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_month "
+                        + "where dt >= '2024-03-20 00:00:00' and dt < '2024-04-01 00:00:00' group by k1");
+        Assertions.assertEquals(le.digest, narrower.digest);
+        Assertions.assertNotEquals(
+                Lists.newArrayList(le.tablet_to_range.values()),
+                Lists.newArrayList(narrower.tablet_to_range.values()));
+    }
+
+    @Test
+    public void testListMultiColumnPartition() throws Throwable {
+        // multi-column list partition with a date_trunc expression and a discrete column:
+        // equivalent predicates on both columns share the digest and the range.
+        TQueryCacheParam q1 = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_multi "
+                        + "where region = 'us' and dt >= '2024-03-15 00:00:00' "
+                        + "and dt < '2024-04-01 00:00:00' group by k1");
+        TQueryCacheParam q2 = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_multi "
+                        + "where region in ('us') and dt >= '2024-03-15 00:00:00' "
+                        + "and dt <= '2024-03-31 23:59:59' group by k1");
+        Assertions.assertEquals(q1.digest, q2.digest);
+        Assertions.assertEquals(q1.tablet_to_range, q2.tablet_to_range);
+
+        // filtering a different discrete value selects a different tuple and changes the
+        // range while the digest stays the same.
+        TQueryCacheParam q3 = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_multi "
+                        + "where region = 'eu' and dt >= '2024-03-15 00:00:00' "
+                        + "and dt < '2024-04-01 00:00:00' group by k1");
+        Assertions.assertEquals(q1.digest, q3.digest);
+        Assertions.assertNotEquals(
+                Lists.newArrayList(q1.tablet_to_range.values()),
+                Lists.newArrayList(q3.tablet_to_range.values()));
+
+        // a predicate only on the non partition column stays in the digest.
+        TQueryCacheParam q4 = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_multi where k1 = 1 group by k1");
+        TQueryCacheParam q5 = getQueryCacheParam(
+                "select k1, sum(v1) as v from db1.list_multi where k1 = 2 group by k1");
+        Assertions.assertNotEquals(q4.digest, q5.digest);
     }
 
     private String getDigest(String sql) throws Exception {
