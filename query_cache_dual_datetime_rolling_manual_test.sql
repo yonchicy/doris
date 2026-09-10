@@ -15,7 +15,13 @@
 -- specific language governing permissions and limitations
 -- under the License.
 
--- 双 DATETIME LIST 表达式分区：手工正确性及 Query Cache 复用测试
+-- 双 DATETIME LIST 表达式分区：整点半开窗口与一小时滚动的 Query Cache 测试
+--
+-- 表仍按 date_trunc(dt1, day)、date_trunc(dt2, day) 分区。
+-- 查询边界按小时对齐，主场景使用 >= 下界、< 上界，避免相邻窗口重复计数。
+-- A 两维为 [08 日 12:00:00, 13 日 12:00:00)，D 为 [08 日 13:00:00, 13 日 13:00:00)。
+-- 按天分区下首次 A→D 预期复用 4×4=16/36；整点查询不等于按小时分区。
+-- 旧版含 12:12:12 的执行报告不适用于本版预期值，请重新执行本脚本。
 --
 -- 执行：先选一个测试数据库，在同一个连接里按节执行。
 -- mysql -h <FE_HOST> -P <QUERY_PORT> -u <USER> -p <TEST_DB> \
@@ -149,7 +155,8 @@ DISTRIBUTED BY HASH(id) BUCKETS 1
 PROPERTIES("replication_num" = "1");
 
 -- 每个分区内 dt1 和 dt2 独立各取六个时间点（共 36 行）：
--- 00:00:00、12:12:11、12:12:12、12:12:13、18:00:00、23:59:59。
+-- 11:59:59、12:00:00、12:00:01、12:59:59、13:00:00、13:00:01。
+-- 两个整点均覆盖前一秒、边界上、后一秒；dt1/dt2 取完整笛卡尔积。
 -- i/j 分别是从 08-07 开始的日期偏移；k/l 分别是两个时间点编号。
 -- col1 = (i+1)*10000 + (j+1)*100 + (k+1)*10 + (l+1)，
 -- 刻意使用不对称权重，避免错用/漏掉某一列条件但 SUM 恰好相同。
@@ -157,11 +164,11 @@ INSERT INTO qc_list_dt1_dt2_rolling
 SELECT
     n.number + copies.number * 2304,
     seconds_add(days_add(CAST('2026-08-07 00:00:00' AS DATETIMEV2(0)), n.i),
-        CASE n.k WHEN 0 THEN 0 WHEN 1 THEN 43931 WHEN 2 THEN 43932
-                 WHEN 3 THEN 43933 WHEN 4 THEN 64800 ELSE 86399 END),
+        CASE n.k WHEN 0 THEN 43199 WHEN 1 THEN 43200 WHEN 2 THEN 43201
+                 WHEN 3 THEN 46799 WHEN 4 THEN 46800 ELSE 46801 END),
     seconds_add(days_add(CAST('2016-08-07 00:00:00' AS DATETIMEV2(0)), n.j),
-        CASE n.l WHEN 0 THEN 0 WHEN 1 THEN 43931 WHEN 2 THEN 43932
-                 WHEN 3 THEN 43933 WHEN 4 THEN 64800 ELSE 86399 END),
+        CASE n.l WHEN 0 THEN 43199 WHEN 1 THEN 43200 WHEN 2 THEN 43201
+                 WHEN 3 THEN 46799 WHEN 4 THEN 46800 ELSE 46801 END),
     (n.i + 1) * 10000 + (n.j + 1) * 100 + (n.k + 1) * 10 + (n.l + 1)
 FROM (
     SELECT number,
@@ -181,47 +188,47 @@ SHOW TABLETS FROM qc_list_dt1_dt2_rolling;
 -- 2. 关闭缓存，保存全部基准。每个结果为 SUM / COUNT；M 返回 NULL / 0。
 -- 后续相同编号必须与这里一致，且还应与独立计算的注释预期一致。
 
--- BASE_A: 原始双窗口；预期 SUM / COUNT = 37523738 / 841 (R=1)
+-- BASE_A: 整点半开双窗口；预期 SUM / COUNT = 37909650 / 900 (R=1)
 SELECT /* QC2D_BASE_A */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- BASE_B: 只滚动 dt1 一天；预期 SUM / COUNT = 45933738 / 841 (R=1)
+-- BASE_B: 只滚动 dt1 一小时；预期 SUM / COUNT = 42409650 / 900 (R=1)
 SELECT /* QC2D_BASE_B */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-09 12:12:12' AND dt1 < '2026-08-14 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 13:00:00' AND dt1 < '2026-08-13 13:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- BASE_C: 只滚动 dt2 一天；预期 SUM / COUNT = 37607838 / 841 (R=1)
+-- BASE_C: 只滚动 dt2 一小时；预期 SUM / COUNT = 37954650 / 900 (R=1)
 SELECT /* QC2D_BASE_C */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-09 12:12:12' AND dt2 < '2016-08-14 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 13:00:00' AND dt2 < '2016-08-13 13:00:00';
 
--- BASE_D: 同时滚动 dt1、dt2 一天；预期 SUM / COUNT = 46017838 / 841 (R=1)
+-- BASE_D: 同时滚动 dt1、dt2 一小时；预期 SUM / COUNT = 42454650 / 900 (R=1)
 SELECT /* QC2D_BASE_D */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-09 12:12:12' AND dt1 < '2026-08-14 12:12:12'
-  AND dt2 > '2016-08-09 12:12:12' AND dt2 < '2016-08-14 12:12:12';
+WHERE dt1 >= '2026-08-08 13:00:00' AND dt1 < '2026-08-13 13:00:00'
+  AND dt2 >= '2016-08-08 13:00:00' AND dt2 < '2016-08-13 13:00:00';
 
--- BASE_E: 日期不变，两维日内边界改成 18:00:00；预期 SUM / COUNT = 40452100 / 841 (R=1)
+-- BASE_E: 两维整点边界改成 18:00:00；预期 SUM / COUNT = 45484650 / 900 (R=1)
 SELECT /* QC2D_BASE_E */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 18:00:00' AND dt1 < '2026-08-13 18:00:00'
-  AND dt2 > '2016-08-08 18:00:00' AND dt2 < '2016-08-13 18:00:00';
+WHERE dt1 >= '2026-08-08 18:00:00' AND dt1 < '2026-08-13 18:00:00'
+  AND dt2 >= '2016-08-08 18:00:00' AND dt2 < '2016-08-13 18:00:00';
 
--- BASE_F: 原始窗口的两个下界改为 >=；预期 SUM / COUNT = 39424650 / 900 (R=1)
+-- BASE_F: 原始窗口的两个下界改为 >，排除恰好 12:00:00 的记录；预期 SUM / COUNT = 36059557 / 841 (R=1)
 SELECT /* QC2D_BASE_F */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 >= '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 >= '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 > '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 > '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- BASE_G: 原始窗口的两个上界改为 <=；预期 SUM / COUNT = 40939650 / 900 (R=1)
+-- BASE_G: 原始窗口的两个上界改为 <=，包含恰好 12:00:00 的记录；预期 SUM / COUNT = 41365687 / 961 (R=1)
 SELECT /* QC2D_BASE_G */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 <= '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 <= '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 <= '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 <= '2016-08-13 12:00:00';
 
 -- BASE_H: 两维均为整天半开区间 [08,13)；预期 SUM / COUNT = 36394650 / 900 (R=1)
 SELECT /* QC2D_BASE_H */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
@@ -235,17 +242,17 @@ FROM qc_list_dt1_dt2_rolling
 WHERE dt1 >= '2026-08-09 00:00:00' AND dt1 < '2026-08-14 00:00:00'
   AND dt2 >= '2016-08-09 00:00:00' AND dt2 < '2016-08-14 00:00:00';
 
--- BASE_J: 同一天的小窗口 (12:12:11,18:00:00)；预期 SUM / COUNT = 161754 / 4 (R=1)
+-- BASE_J: 同一天的整点窗口 [12:00:00,18:00:00)；预期 SUM / COUNT = 1011100 / 25 (R=1)
 SELECT /* QC2D_BASE_J */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-10 12:12:11' AND dt1 < '2026-08-10 18:00:00'
-  AND dt2 > '2016-08-10 12:12:11' AND dt2 < '2016-08-10 18:00:00';
+WHERE dt1 >= '2026-08-10 12:00:00' AND dt1 < '2026-08-10 18:00:00'
+  AND dt2 >= '2016-08-10 12:00:00' AND dt2 < '2016-08-10 18:00:00';
 
--- BASE_K: 同一天的小窗口 (12:12:12,18:00:00)；预期 SUM / COUNT = 40444 / 1 (R=1)
+-- BASE_K: 同一天的整点窗口 [13:00:00,18:00:00)；预期 SUM / COUNT = 161842 / 4 (R=1)
 SELECT /* QC2D_BASE_K */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-10 12:12:12' AND dt1 < '2026-08-10 18:00:00'
-  AND dt2 > '2016-08-10 12:12:12' AND dt2 < '2016-08-10 18:00:00';
+WHERE dt1 >= '2026-08-10 13:00:00' AND dt1 < '2026-08-10 18:00:00'
+  AND dt2 >= '2016-08-10 13:00:00' AND dt2 < '2016-08-10 18:00:00';
 
 -- BASE_L: 两维均为 07 日，与之前的窗口不重叠；预期 SUM / COUNT = 364986 / 36 (R=1)
 SELECT /* QC2D_BASE_L */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
@@ -256,14 +263,14 @@ WHERE dt1 >= '2026-08-07 00:00:00' AND dt1 < '2026-08-08 00:00:00'
 -- BASE_M: dt2 超出全部分区，空结果；预期 SUM / COUNT = NULL / 0 (R=1)
 SELECT /* QC2D_BASE_M */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-20 12:12:12' AND dt2 < '2016-08-21 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-20 12:00:00' AND dt2 < '2016-08-21 12:00:00';
 
--- BASE_N: 原始窗口增加非分区列过滤 col1 % 2 = 0；预期 SUM / COUNT = 19405540 / 435 (R=1)
+-- BASE_N: 整点窗口增加非分区列过滤 col1 % 2 = 0；预期 SUM / COUNT = 18947550 / 450 (R=1)
 SELECT /* QC2D_BASE_N */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12'
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00'
   AND col1 % 2 = 0;
 
 -- 3. 最重要的复用链：首次 A → 重复 A → 首次 D → 重复 D。
@@ -272,37 +279,37 @@ SET enable_query_cache = true;
 EXPLAIN
 SELECT /* QC2D_EXPLAIN_A */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
 -- A、D 均选中 36 个分区。A 首次全部未命中，重复 A 应全部命中。
--- A_FILL: 原始双窗口；预期 SUM / COUNT = 37523738 / 841 (R=1)
+-- A_FILL: 整点半开双窗口；预期 SUM / COUNT = 37909650 / 900 (R=1)
 SELECT /* QC2D_A_FILL */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- A_HIT: 原始双窗口；预期 SUM / COUNT = 37523738 / 841 (R=1)
+-- A_HIT: 整点半开双窗口；预期 SUM / COUNT = 37909650 / 900 (R=1)
 SELECT /* QC2D_A_HIT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- A 和 D 重叠 25 个日期分区，但边界分区内的范围不同。
--- 首次 D 仅 p10_10..p12_12 组成的 3×3=9 个分区应复用；
--- 其余 27 个分区需计算（11 个新分区 + 16 个边界语义变化的重叠分区）。
--- 比如 p09_10：A 覆盖 dt1 全天，D 仅 dt1>12:12:12，不能混用缓存。
--- D_ROLL_FIRST: 同时滚动 dt1、dt2 一天；预期 SUM / COUNT = 46017838 / 841 (R=1)
+-- A 和 D 都访问 08～13 日组成的同一批 36 个日期分区，没有新增分区。
+-- 首次 D 仅 p09_09..p12_12 组成的 4×4=16 个完整日期分区应复用；
+-- 其余 20 个分区至少有一维落在 08 日或 13 日，整点边界变化后需重新计算。
+-- 比如 p08_10：A 的 dt1>=12:00:00，D 的 dt1>=13:00:00，不能混用缓存。
+-- D_ROLL_FIRST: 同时滚动 dt1、dt2 一小时；预期 SUM / COUNT = 42454650 / 900 (R=1)
 SELECT /* QC2D_D_ROLL_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-09 12:12:12' AND dt1 < '2026-08-14 12:12:12'
-  AND dt2 > '2016-08-09 12:12:12' AND dt2 < '2016-08-14 12:12:12';
+WHERE dt1 >= '2026-08-08 13:00:00' AND dt1 < '2026-08-13 13:00:00'
+  AND dt2 >= '2016-08-08 13:00:00' AND dt2 < '2016-08-13 13:00:00';
 
--- D_HIT: 同时滚动 dt1、dt2 一天；预期 SUM / COUNT = 46017838 / 841 (R=1)
+-- D_HIT: 同时滚动 dt1、dt2 一小时；预期 SUM / COUNT = 42454650 / 900 (R=1)
 SELECT /* QC2D_D_HIT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-09 12:12:12' AND dt1 < '2026-08-14 12:12:12'
-  AND dt2 > '2016-08-09 12:12:12' AND dt2 < '2016-08-14 12:12:12';
+WHERE dt1 >= '2026-08-08 13:00:00' AND dt1 < '2026-08-13 13:00:00'
+  AND dt2 >= '2016-08-08 13:00:00' AND dt2 < '2016-08-13 13:00:00';
 
 -- 立即记录上面最后一个 SELECT 的查询 ID；其他查询也可照此操作。
 SELECT LAST_QUERY_ID();
@@ -313,65 +320,65 @@ SHOW QUERY PROFILE;
 -- 因为前面已经执行多种窗口，不为本节首查假定固定命中数。
 -- 每个非空查询紧接的重复执行应命中该查询刚填充的缓存。
 
--- B_FIRST: 只滚动 dt1 一天；预期 SUM / COUNT = 45933738 / 841 (R=1)
+-- B_FIRST: 只滚动 dt1 一小时；预期 SUM / COUNT = 42409650 / 900 (R=1)
 SELECT /* QC2D_B_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-09 12:12:12' AND dt1 < '2026-08-14 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 13:00:00' AND dt1 < '2026-08-13 13:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- B_REPEAT: 只滚动 dt1 一天；预期 SUM / COUNT = 45933738 / 841 (R=1)
+-- B_REPEAT: 只滚动 dt1 一小时；预期 SUM / COUNT = 42409650 / 900 (R=1)
 SELECT /* QC2D_B_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-09 12:12:12' AND dt1 < '2026-08-14 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 13:00:00' AND dt1 < '2026-08-13 13:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- C_FIRST: 只滚动 dt2 一天；预期 SUM / COUNT = 37607838 / 841 (R=1)
+-- C_FIRST: 只滚动 dt2 一小时；预期 SUM / COUNT = 37954650 / 900 (R=1)
 SELECT /* QC2D_C_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-09 12:12:12' AND dt2 < '2016-08-14 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 13:00:00' AND dt2 < '2016-08-13 13:00:00';
 
--- C_REPEAT: 只滚动 dt2 一天；预期 SUM / COUNT = 37607838 / 841 (R=1)
+-- C_REPEAT: 只滚动 dt2 一小时；预期 SUM / COUNT = 37954650 / 900 (R=1)
 SELECT /* QC2D_C_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-09 12:12:12' AND dt2 < '2016-08-14 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 13:00:00' AND dt2 < '2016-08-13 13:00:00';
 
--- E_FIRST: 日期不变，两维日内边界改成 18:00:00；预期 SUM / COUNT = 40452100 / 841 (R=1)
+-- E_FIRST: 两维整点边界改成 18:00:00；预期 SUM / COUNT = 45484650 / 900 (R=1)
 SELECT /* QC2D_E_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 18:00:00' AND dt1 < '2026-08-13 18:00:00'
-  AND dt2 > '2016-08-08 18:00:00' AND dt2 < '2016-08-13 18:00:00';
+WHERE dt1 >= '2026-08-08 18:00:00' AND dt1 < '2026-08-13 18:00:00'
+  AND dt2 >= '2016-08-08 18:00:00' AND dt2 < '2016-08-13 18:00:00';
 
--- E_REPEAT: 日期不变，两维日内边界改成 18:00:00；预期 SUM / COUNT = 40452100 / 841 (R=1)
+-- E_REPEAT: 两维整点边界改成 18:00:00；预期 SUM / COUNT = 45484650 / 900 (R=1)
 SELECT /* QC2D_E_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 18:00:00' AND dt1 < '2026-08-13 18:00:00'
-  AND dt2 > '2016-08-08 18:00:00' AND dt2 < '2016-08-13 18:00:00';
+WHERE dt1 >= '2026-08-08 18:00:00' AND dt1 < '2026-08-13 18:00:00'
+  AND dt2 >= '2016-08-08 18:00:00' AND dt2 < '2016-08-13 18:00:00';
 
--- F_FIRST: 原始窗口的两个下界改为 >=；预期 SUM / COUNT = 39424650 / 900 (R=1)
+-- F_FIRST: 原始窗口的两个下界改为 >，排除恰好 12:00:00 的记录；预期 SUM / COUNT = 36059557 / 841 (R=1)
 SELECT /* QC2D_F_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 >= '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 >= '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 > '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 > '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- F_REPEAT: 原始窗口的两个下界改为 >=；预期 SUM / COUNT = 39424650 / 900 (R=1)
+-- F_REPEAT: 原始窗口的两个下界改为 >，排除恰好 12:00:00 的记录；预期 SUM / COUNT = 36059557 / 841 (R=1)
 SELECT /* QC2D_F_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 >= '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 >= '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 > '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 > '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- G_FIRST: 原始窗口的两个上界改为 <=；预期 SUM / COUNT = 40939650 / 900 (R=1)
+-- G_FIRST: 原始窗口的两个上界改为 <=，包含恰好 12:00:00 的记录；预期 SUM / COUNT = 41365687 / 961 (R=1)
 SELECT /* QC2D_G_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 <= '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 <= '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 <= '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 <= '2016-08-13 12:00:00';
 
--- G_REPEAT: 原始窗口的两个上界改为 <=；预期 SUM / COUNT = 40939650 / 900 (R=1)
+-- G_REPEAT: 原始窗口的两个上界改为 <=，包含恰好 12:00:00 的记录；预期 SUM / COUNT = 41365687 / 961 (R=1)
 SELECT /* QC2D_G_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 <= '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 <= '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 <= '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 <= '2016-08-13 12:00:00';
 
 -- H_FIRST: 两维均为整天半开区间 [08,13)；预期 SUM / COUNT = 36394650 / 900 (R=1)
 SELECT /* QC2D_H_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
@@ -399,31 +406,31 @@ WHERE dt1 >= '2026-08-09 00:00:00' AND dt1 < '2026-08-14 00:00:00'
 
 -- J 与 K 都只读 p10_10，同一 tablet 上不同日内范围不能交叉误命中。
 
--- J_FIRST: 同一天的小窗口 (12:12:11,18:00:00)；预期 SUM / COUNT = 161754 / 4 (R=1)
+-- J_FIRST: 同一天的整点窗口 [12:00:00,18:00:00)；预期 SUM / COUNT = 1011100 / 25 (R=1)
 SELECT /* QC2D_J_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-10 12:12:11' AND dt1 < '2026-08-10 18:00:00'
-  AND dt2 > '2016-08-10 12:12:11' AND dt2 < '2016-08-10 18:00:00';
+WHERE dt1 >= '2026-08-10 12:00:00' AND dt1 < '2026-08-10 18:00:00'
+  AND dt2 >= '2016-08-10 12:00:00' AND dt2 < '2016-08-10 18:00:00';
 
--- J_REPEAT: 同一天的小窗口 (12:12:11,18:00:00)；预期 SUM / COUNT = 161754 / 4 (R=1)
+-- J_REPEAT: 同一天的整点窗口 [12:00:00,18:00:00)；预期 SUM / COUNT = 1011100 / 25 (R=1)
 SELECT /* QC2D_J_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-10 12:12:11' AND dt1 < '2026-08-10 18:00:00'
-  AND dt2 > '2016-08-10 12:12:11' AND dt2 < '2016-08-10 18:00:00';
+WHERE dt1 >= '2026-08-10 12:00:00' AND dt1 < '2026-08-10 18:00:00'
+  AND dt2 >= '2016-08-10 12:00:00' AND dt2 < '2016-08-10 18:00:00';
 
--- K 首查必须重新计算：J 是 4 行 / 161754，K 是 1 行 / 40444。
+-- K 首查必须重新计算：J 是 25 行 / 1011100，K 是 4 行 / 161842。
 
--- K_FIRST: 同一天的小窗口 (12:12:12,18:00:00)；预期 SUM / COUNT = 40444 / 1 (R=1)
+-- K_FIRST: 同一天的整点窗口 [13:00:00,18:00:00)；预期 SUM / COUNT = 161842 / 4 (R=1)
 SELECT /* QC2D_K_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-10 12:12:12' AND dt1 < '2026-08-10 18:00:00'
-  AND dt2 > '2016-08-10 12:12:12' AND dt2 < '2016-08-10 18:00:00';
+WHERE dt1 >= '2026-08-10 13:00:00' AND dt1 < '2026-08-10 18:00:00'
+  AND dt2 >= '2016-08-10 13:00:00' AND dt2 < '2016-08-10 18:00:00';
 
--- K_REPEAT: 同一天的小窗口 (12:12:12,18:00:00)；预期 SUM / COUNT = 40444 / 1 (R=1)
+-- K_REPEAT: 同一天的整点窗口 [13:00:00,18:00:00)；预期 SUM / COUNT = 161842 / 4 (R=1)
 SELECT /* QC2D_K_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-10 12:12:12' AND dt1 < '2026-08-10 18:00:00'
-  AND dt2 > '2016-08-10 12:12:12' AND dt2 < '2016-08-10 18:00:00';
+WHERE dt1 >= '2026-08-10 13:00:00' AND dt1 < '2026-08-10 18:00:00'
+  AND dt2 >= '2016-08-10 13:00:00' AND dt2 < '2016-08-10 18:00:00';
 
 -- L_FIRST: 两维均为 07 日，与之前的窗口不重叠；预期 SUM / COUNT = 364986 / 36 (R=1)
 SELECT /* QC2D_L_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
@@ -442,102 +449,102 @@ WHERE dt1 >= '2026-08-07 00:00:00' AND dt1 < '2026-08-08 00:00:00'
 -- M_FIRST: dt2 超出全部分区，空结果；预期 SUM / COUNT = NULL / 0 (R=1)
 SELECT /* QC2D_M_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-20 12:12:12' AND dt2 < '2016-08-21 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-20 12:00:00' AND dt2 < '2016-08-21 12:00:00';
 
 -- M_REPEAT: dt2 超出全部分区，空结果；预期 SUM / COUNT = NULL / 0 (R=1)
 SELECT /* QC2D_M_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-20 12:12:12' AND dt2 < '2016-08-21 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-20 12:00:00' AND dt2 < '2016-08-21 12:00:00';
 
 -- N 新增 col1 过滤，不能复用未过滤的 A 聚合；它的 SUM/COUNT 都不同。
 
--- N_FIRST: 原始窗口增加非分区列过滤 col1 % 2 = 0；预期 SUM / COUNT = 19405540 / 435 (R=1)
+-- N_FIRST: 整点窗口增加非分区列过滤 col1 % 2 = 0；预期 SUM / COUNT = 18947550 / 450 (R=1)
 SELECT /* QC2D_N_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12'
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00'
   AND col1 % 2 = 0;
 
--- N_REPEAT: 原始窗口增加非分区列过滤 col1 % 2 = 0；预期 SUM / COUNT = 19405540 / 435 (R=1)
+-- N_REPEAT: 整点窗口增加非分区列过滤 col1 % 2 = 0；预期 SUM / COUNT = 18947550 / 450 (R=1)
 SELECT /* QC2D_N_REPEAT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12'
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00'
   AND col1 % 2 = 0;
 
 -- 5. 直接覆盖用户的 SUM-only 形态。
 -- 增减聚合项会改变缓存计划，因此它自成一组；不要与 SUM+COUNT 的命中混算。
 SET enable_query_cache = false;
--- SUM_ONLY_BASE: 原始双窗口；预期 SUM = 37523738 (R=1)
+-- SUM_ONLY_BASE: 整点半开双窗口；预期 SUM = 37909650 (R=1)
 SELECT /* QC2D_SUM_ONLY_BASE */ SUM(col1) AS sum_col1
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
 SET enable_query_cache = true;
--- SUM_ONLY_FILL: 原始双窗口；预期 SUM = 37523738 (R=1)
+-- SUM_ONLY_FILL: 整点半开双窗口；预期 SUM = 37909650 (R=1)
 SELECT /* QC2D_SUM_ONLY_FILL */ SUM(col1) AS sum_col1
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- SUM_ONLY_HIT: 原始双窗口；预期 SUM = 37523738 (R=1)
+-- SUM_ONLY_HIT: 整点半开双窗口；预期 SUM = 37909650 (R=1)
 SELECT /* QC2D_SUM_ONLY_HIT */ SUM(col1) AS sum_col1
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- SUM_ONLY_ROLL: 同时滚动 dt1、dt2 一天；预期 SUM = 46017838 (R=1)
+-- SUM_ONLY_ROLL: 同时滚动 dt1、dt2 一小时；预期 SUM = 42454650 (R=1)
 SELECT /* QC2D_SUM_ONLY_ROLL */ SUM(col1) AS sum_col1
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-09 12:12:12' AND dt1 < '2026-08-14 12:12:12'
-  AND dt2 > '2016-08-09 12:12:12' AND dt2 < '2016-08-14 12:12:12';
+WHERE dt1 >= '2026-08-08 13:00:00' AND dt1 < '2026-08-13 13:00:00'
+  AND dt2 >= '2016-08-08 13:00:00' AND dt2 < '2016-08-13 13:00:00';
 
--- SUM_ONLY_ROLL_HIT: 同时滚动 dt1、dt2 一天；预期 SUM = 46017838 (R=1)
+-- SUM_ONLY_ROLL_HIT: 同时滚动 dt1、dt2 一小时；预期 SUM = 42454650 (R=1)
 SELECT /* QC2D_SUM_ONLY_ROLL_HIT */ SUM(col1) AS sum_col1
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-09 12:12:12' AND dt1 < '2026-08-14 12:12:12'
-  AND dt2 > '2016-08-09 12:12:12' AND dt2 < '2016-08-14 12:12:12';
+WHERE dt1 >= '2026-08-08 13:00:00' AND dt1 < '2026-08-13 13:00:00'
+  AND dt2 >= '2016-08-08 13:00:00' AND dt2 < '2016-08-13 13:00:00';
 
 
 -- 6. 分区版本变化：先重新热好 A，再只向 p10_10 插入一行。
 -- 只执行 INSERT 一次；重跑整套时会在第 1 节重建表。
--- BEFORE_WRITE_WARM: 原始双窗口；预期 SUM / COUNT = 37523738 / 841 (R=1)
+-- BEFORE_WRITE_WARM: 整点半开双窗口；预期 SUM / COUNT = 37909650 / 900 (R=1)
 SELECT /* QC2D_BEFORE_WRITE_WARM */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- BEFORE_WRITE_HIT: 原始双窗口；预期 SUM / COUNT = 37523738 / 841 (R=1)
+-- BEFORE_WRITE_HIT: 整点半开双窗口；预期 SUM / COUNT = 37909650 / 900 (R=1)
 SELECT /* QC2D_BEFORE_WRITE_HIT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
 INSERT INTO qc_list_dt1_dt2_rolling VALUES
     (9000000000, '2026-08-10 13:00:00', '2016-08-10 13:00:00', 1000000000);
 
--- 确认 INSERT 成功且已可见后执行。R=1：SUM=1037523738，COUNT=842。
--- 一般 R：SUM=37523738*R+1000000000，COUNT=841*R+1。
+-- 确认 INSERT 成功且已可见后执行。R=1：SUM=1037909650，COUNT=901。
+-- 一般 R：SUM=37909650*R+1000000000，COUNT=900*R+1。
 -- 增量缓存已关闭：p10_10 应版本失效并重算，其余 35 个分区可命中。
 SELECT /* QC2D_AFTER_WRITE_FIRST */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
--- 重复应命中新版本，结果仍为 1037523738 / 842（R=1）。
+-- 重复应命中新版本，结果仍为 1037909650 / 901（R=1）。
 SELECT /* QC2D_AFTER_WRITE_HIT */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
 SET enable_query_cache = false;
 SELECT /* QC2D_AFTER_WRITE_BASE */ SUM(col1) AS sum_col1, COUNT(*) AS row_count
 FROM qc_list_dt1_dt2_rolling
-WHERE dt1 > '2026-08-08 12:12:12' AND dt1 < '2026-08-13 12:12:12'
-  AND dt2 > '2016-08-08 12:12:12' AND dt2 < '2016-08-13 12:12:12';
+WHERE dt1 >= '2026-08-08 12:00:00' AND dt1 < '2026-08-13 12:00:00'
+  AND dt2 >= '2016-08-08 12:00:00' AND dt2 < '2016-08-13 12:00:00';
 
 -- 7. 补充：一个 LIST 分区含多个日期 tuple，防止同一 tablet 内错误复用。
 DROP TABLE IF EXISTS qc_list_dt1_dt2_multi;
