@@ -17,8 +17,21 @@
 
 package org.apache.doris.planner;
 
+import org.apache.doris.analysis.BoolLiteral;
+import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.FunctionCallExpr;
+import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.StringLiteral;
+import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.DataProperty;
 import org.apache.doris.catalog.Env;
+import org.apache.doris.catalog.HashDistributionInfo;
+import org.apache.doris.catalog.ListPartitionInfo;
+import org.apache.doris.catalog.ListPartitionItem;
+import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.Partition;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.planner.OlapTableSink.AdaptiveBucketAssignment;
 import org.apache.doris.planner.OlapTableSink.AdaptiveIndexBucketAssignment;
 import org.apache.doris.system.Backend;
@@ -26,20 +39,63 @@ import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.TOlapTableIndexTablets;
 import org.apache.doris.thrift.TOlapTableLocationParam;
 import org.apache.doris.thrift.TOlapTablePartition;
+import org.apache.doris.thrift.TOlapTablePartitionParam;
 import org.apache.doris.thrift.TTabletLocation;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 public class OlapTableSinkTest {
+    @Test
+    public void testManualListPartitionFunctionExprsDoNotEnableAutoPartition() throws Exception {
+        OlapTable table = Mockito.mock(OlapTable.class);
+        Column partitionColumn = new Column("dt", ScalarType.createDatetimeV2Type(0));
+        ArrayList<Expr> metadataExprs = Lists.newArrayList(new FunctionCallExpr("date_trunc",
+                Lists.newArrayList(new SlotRef(null, "dt"), new StringLiteral("day")), true));
+        ListPartitionInfo partitionInfo = new ListPartitionInfo(
+                false, metadataExprs, Collections.singletonList(partitionColumn));
+        ListPartitionItem partitionItem = Mockito.mock(ListPartitionItem.class);
+        DataProperty dataProperty = Mockito.mock(DataProperty.class);
+        Partition partition = Mockito.mock(Partition.class);
+        MaterializedIndex index = Mockito.mock(MaterializedIndex.class);
+        HashDistributionInfo distributionInfo = new HashDistributionInfo(
+                1, Collections.singletonList(partitionColumn));
+        BoolLiteral analyzedPartitionExpr = new BoolLiteral(true);
+        partitionInfo.setItem(1L, false, partitionItem);
+        partitionInfo.setDataProperty(1L, dataProperty);
+
+        Mockito.when(dataProperty.isMutable()).thenReturn(true);
+        Mockito.when(table.getPartitionInfo()).thenReturn(partitionInfo);
+        Mockito.when(partitionItem.getItems()).thenReturn(Collections.emptyList());
+        Mockito.when(partitionItem.isDefaultPartition()).thenReturn(false);
+        Mockito.when(table.getPartition(1L)).thenReturn(partition);
+        Mockito.when(partition.getId()).thenReturn(1L);
+        Mockito.when(partition.getMaterializedIndices(MaterializedIndex.IndexExtState.ALL))
+                .thenReturn(Collections.singletonList(index));
+        Mockito.when(partition.getDistributionInfo()).thenReturn(distributionInfo);
+        Mockito.when(index.getId()).thenReturn(10L);
+        Mockito.when(index.getTablets()).thenReturn(Collections.emptyList());
+
+        OlapTableSink sink = new OlapTableSink(table, null, Collections.singletonList(1L), false,
+                Collections.singletonList(analyzedPartitionExpr), Collections.emptyMap());
+        TOlapTablePartitionParam param = sink.createPartition(1L, table);
+
+        Assert.assertTrue(param.isSetPartitionFunctionExprs());
+        Assert.assertEquals(1, param.getPartitionFunctionExprsSize());
+        Assert.assertTrue(param.isSetEnableAutomaticPartition());
+        Assert.assertFalse(param.isEnableAutomaticPartition());
+    }
+
     @Test
     public void testCreateDummyLocationUsesLoadAvailableBackendInCurrentComputeGroup() throws Exception {
         SystemInfoService systemInfoService = Mockito.mock(SystemInfoService.class);

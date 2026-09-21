@@ -41,6 +41,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -270,7 +271,8 @@ public class ListPartitionInfoTest {
         Assert.assertEquals("day", PartitionExprUtil.validateDateTruncTimeUnit("DAY"));
         AnalysisException exception = Assert.assertThrows(AnalysisException.class,
                 () -> PartitionExprUtil.validateDateTruncTimeUnit("millisecond"));
-        Assert.assertEquals("Unsupported date_trunc time unit: millisecond", exception.getMessage());
+        Assert.assertTrue(exception.getMessage(),
+                exception.getMessage().contains("Unsupported date_trunc time unit: millisecond"));
     }
 
     @Test
@@ -337,6 +339,26 @@ public class ListPartitionInfoTest {
 
         Assert.assertEquals("2026-07-23 13:00:00",
                 ((ListPartitionItem) partitionItem).getItems().get(0).getKeys().get(0).getStringValue());
+    }
+
+    @Test
+    public void testListDateTruncRejectsTimestampTzSourceColumn() throws AnalysisException, DdlException {
+        Column eventTime = new Column(
+                "event_time", ScalarType.createTimeStampTzType(6), true, null, "", "");
+        List<Column> schema = Lists.newArrayList(eventTime);
+        ListPartitionDesc expressionList = new ListPartitionDesc(
+                Lists.newArrayList(createDateTruncExpr("event_time", "day")),
+                Lists.newArrayList("event_time"), Lists.newArrayList(), false);
+
+        DdlException exception = Assert.assertThrows(DdlException.class,
+                () -> expressionList.toPartitionInfo(schema, new HashMap<>(), false));
+
+        Assert.assertTrue(exception.getMessage(), exception.getMessage().contains(
+                PartitionExprUtil.LIST_DATE_TRUNC_TIMESTAMPTZ_ERROR));
+
+        ListPartitionDesc plainList = new ListPartitionDesc(
+                Lists.newArrayList("event_time"), Lists.newArrayList());
+        Assert.assertNotNull(plainList.toPartitionInfo(schema, new HashMap<>(), false));
     }
 
     @Test

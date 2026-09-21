@@ -523,7 +523,6 @@ public class QueryCacheNormalizerTest extends TestWithFeService {
                 "select k1, sum(v1) as v from db1.list_region where region = 'us' group by k1");
         TQueryCacheParam in = getQueryCacheParam(
                 "select k1, sum(v1) as v from db1.list_region where region in ('us') group by k1");
-        Assertions.assertEquals(noFilter.digest, eq.digest);
         Assertions.assertEquals(eq.digest, in.digest);
         Assertions.assertEquals(eq.tablet_to_range, in.tablet_to_range);
 
@@ -566,6 +565,54 @@ public class QueryCacheNormalizerTest extends TestWithFeService {
         Assertions.assertNotEquals(
                 Lists.newArrayList(le.tablet_to_range.values()),
                 Lists.newArrayList(narrower.tablet_to_range.values()));
+    }
+
+    @Test
+    public void testListDateTruncNotInRange() throws Exception {
+        assertNotInPartitionRanges("db1.list_month", "");
+    }
+
+    @Test
+    public void testRangePartitionNotInRange() throws Exception {
+        assertNotInPartitionRanges("db1.part1", "");
+    }
+
+    @Test
+    public void testMultiColumnListNotInRange() throws Exception {
+        assertNotInPartitionRanges("db1.list_multi", " and region = 'us'");
+    }
+
+    private void assertNotInPartitionRanges(String table, String extraPredicate) throws Exception {
+        String query = "select k1, sum(v1) as v from " + table
+                + " where dt >= '2024-03-01' and dt < '2024-04-01'" + extraPredicate;
+        String groupBy = " group by k1";
+        TQueryCacheParam fullRange = getQueryCacheParam(query + groupBy);
+        TQueryCacheParam first = getQueryCacheParam(query
+                + " and dt not in ('2024-03-15', '2024-03-20')" + groupBy);
+        TQueryCacheParam second = getQueryCacheParam(query
+                + " and dt not in ('2024-03-16', '2024-03-21')" + groupBy);
+
+        // NOT IN is extracted from the digest, but different exclusions on the same
+        // tablets must produce different effective ranges.
+        Assertions.assertEquals(first.digest, second.digest);
+        Assertions.assertEquals(first.tablet_to_range.keySet(), second.tablet_to_range.keySet());
+        Assertions.assertNotEquals(first.tablet_to_range, second.tablet_to_range);
+        Assertions.assertNotEquals(first.tablet_to_range, fullRange.tablet_to_range);
+
+        TQueryCacheParam reordered = getQueryCacheParam(query
+                + " and dt not in ('2024-03-20', '2024-03-15', '2024-03-20')" + groupBy);
+        Assertions.assertEquals(first.digest, reordered.digest);
+        Assertions.assertEquals(first.tablet_to_range, reordered.tablet_to_range);
+
+        TQueryCacheParam outsidePartition = getQueryCacheParam(query
+                + " and dt not in ('2024-03-15', '2024-03-20', '2024-04-15')" + groupBy);
+        Assertions.assertEquals(first.digest, outsidePartition.digest);
+        Assertions.assertEquals(first.tablet_to_range, outsidePartition.tablet_to_range);
+
+        TQueryCacheParam notEqual = getQueryCacheParam(query
+                + " and dt != '2024-03-15' and dt != '2024-03-20'" + groupBy);
+        Assertions.assertEquals(first.digest, notEqual.digest);
+        Assertions.assertEquals(first.tablet_to_range, notEqual.tablet_to_range);
     }
 
     @Test

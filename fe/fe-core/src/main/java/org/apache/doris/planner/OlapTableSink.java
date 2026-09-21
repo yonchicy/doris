@@ -86,6 +86,7 @@ import org.apache.doris.thrift.TTabletLocation;
 import org.apache.doris.thrift.TUniqueId;
 import org.apache.doris.thrift.TUniqueKeyUpdateMode;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Lists;
@@ -989,8 +990,8 @@ public class OlapTableSink extends DataSink {
         return rotatedBucketSeqs;
     }
 
-    private TOlapTablePartitionParam createPartition(long dbId, OlapTable table)
-            throws UserException {
+    @VisibleForTesting
+    TOlapTablePartitionParam createPartition(long dbId, OlapTable table) throws UserException {
         TOlapTablePartitionParam partitionParam = new TOlapTablePartitionParam();
         PartitionInfo partitionInfo = table.getPartitionInfo();
         boolean enableAutomaticPartition = partitionInfo.enableAutomaticPartition();
@@ -1060,7 +1061,8 @@ public class OlapTableSink extends DataSink {
                 }
 
                 ArrayList<Expr> exprSource = partitionInfo.getPartitionExprs();
-                if (enableAutomaticPartition && exprSource != null && !exprSource.isEmpty()) {
+                if ((enableAutomaticPartition || partitionInfo.hasPartitionFunction())
+                        && exprSource != null && !exprSource.isEmpty()) {
                     if (exprSource.size() != partitionExprs.size()) {
                         throw new UserException(String.format("%s is not analyzed", exprSource));
                     }

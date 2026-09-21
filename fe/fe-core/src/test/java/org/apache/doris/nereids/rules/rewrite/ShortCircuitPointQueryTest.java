@@ -53,6 +53,58 @@ class ShortCircuitPointQueryTest extends TestWithFeService
                 + "  \"light_schema_change\" = \"true\",\n"
                 + "  \"store_row_column\" = \"true\"\n"
                 + ");");
+        createTable("CREATE TABLE `tbl_point_query_list_expr` (\n"
+                + "  `dt` datetimev2(0) NOT NULL,\n"
+                + "  `id` int NOT NULL,\n"
+                + "  `v1` varchar(30) NULL\n"
+                + ") ENGINE=OLAP\n"
+                + "UNIQUE KEY(`dt`, `id`)\n"
+                + "PARTITION BY LIST(date_trunc(`dt`, 'day')) (\n"
+                + "  PARTITION p20260723 VALUES IN ('2026-07-23 00:00:00')\n"
+                + ")\n"
+                + "DISTRIBUTED BY HASH(`id`) BUCKETS 1\n"
+                + "PROPERTIES (\n"
+                + "  \"replication_num\" = \"1\",\n"
+                + "  \"enable_unique_key_merge_on_write\" = \"true\",\n"
+                + "  \"light_schema_change\" = \"true\",\n"
+                + "  \"store_row_column\" = \"true\"\n"
+                + ");");
+        createTable("CREATE TABLE `tbl_point_query_range_expr` (\n"
+                + "  `dt` datetimev2(0) NOT NULL,\n"
+                + "  `id` int NOT NULL,\n"
+                + "  `v1` varchar(30) NULL\n"
+                + ") ENGINE=OLAP\n"
+                + "UNIQUE KEY(`dt`, `id`)\n"
+                + "AUTO PARTITION BY RANGE(date_trunc(`dt`, 'day')) ()\n"
+                + "DISTRIBUTED BY HASH(`id`) BUCKETS 1\n"
+                + "PROPERTIES (\n"
+                + "  \"replication_num\" = \"1\",\n"
+                + "  \"enable_unique_key_merge_on_write\" = \"true\",\n"
+                + "  \"light_schema_change\" = \"true\",\n"
+                + "  \"store_row_column\" = \"true\"\n"
+                + ");");
+    }
+
+    @Test
+    void testExpressionPartitionDoesNotUseShortCircuitPointQuery() {
+        boolean originRunningUnitTest = FeConstants.runningUnitTest;
+        FeConstants.runningUnitTest = false;
+        try {
+            assertShortCircuitDisabled("tbl_point_query_list_expr");
+            assertShortCircuitDisabled("tbl_point_query_range_expr");
+        } finally {
+            FeConstants.runningUnitTest = originRunningUnitTest;
+        }
+    }
+
+    private void assertShortCircuitDisabled(String tableName) {
+        String sql = "select * from " + tableName
+                + " where dt = '2026-07-23 12:00:00' and id = 1";
+        createStatementCtx(sql);
+        PlanChecker.from(connectContext)
+                .analyze(sql)
+                .rewrite();
+        Assertions.assertFalse(connectContext.getStatementContext().isShortCircuitQuery());
     }
 
     @Test

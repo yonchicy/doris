@@ -335,10 +335,10 @@ public class DeleteFromCommand extends Command implements ForwardWithSync, Expla
                 sortedPartitionRanges = (Optional) sortedPartitionRangesOpt;
             }
         }
-        List<Long> prunedPartitions = PartitionPruner.prune(
+        List<Long> prunedPartitions = PartitionPruner.pruneWithResult(
                 partitionSlots, filter.getPredicate(), idToPartitions,
                 CascadesContext.initContext(new StatementContext(), this, PhysicalProperties.ANY),
-                PartitionTableType.OLAP, sortedPartitionRanges).first;
+                PartitionTableType.OLAP, partitionInfo.getPartitionExprs(), sortedPartitionRanges).partitions;
         return prunedPartitions.stream().map(olapTable::getPartition).collect(Collectors.toList());
     }
 

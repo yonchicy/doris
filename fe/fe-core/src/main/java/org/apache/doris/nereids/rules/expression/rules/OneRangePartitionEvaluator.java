@@ -206,6 +206,15 @@ public class OneRangePartitionEvaluator<K>
 
     @Override
     public Expression evaluate(Expression expression, Map<Slot, PartitionSlotInput> currentInputs) {
+        if (independentRangeMode) {
+            // LIST tuples are evaluated sequentially. Rebuild nullability for this tuple,
+            // including clearing function results derived from the previous tuple.
+            partitionSlotContainsNull.clear();
+            for (Slot partitionSlot : partitionSlots) {
+                partitionSlotContainsNull.put(partitionSlot,
+                        currentInputs.get(partitionSlot).result instanceof NullLiteral);
+            }
+        }
         Map<Expression, ColumnRange> defaultColumnRanges = currentInputs.values().iterator().next().columnRanges;
         Map<Expression, ColumnRange> rangeMap = new HashMap<>(defaultColumnRanges);
         EvaluateRangeResult result = expression.accept(this, new EvaluateRangeInput(currentInputs, rangeMap));
@@ -396,6 +405,10 @@ public class OneRangePartitionEvaluator<K>
         }
 
         EvaluateRangeResult leftResult = inPredicate.getCompareExpr().accept(this, context);
+        if (leftResult.result instanceof NullLiteral) {
+            return new EvaluateRangeResult(
+                    NullLiteral.BOOLEAN_INSTANCE, leftResult.columnRanges, ImmutableList.of(leftResult), false);
+        }
         Map<Expression, ColumnRange> exprRanges = leftResult.columnRanges;
         if (!exprRanges.containsKey(inPredicate.getCompareExpr())) {
             EvaluateRangeResult result = evaluateChildrenThenThis(inPredicate, context);
@@ -411,15 +424,20 @@ public class OneRangePartitionEvaluator<K>
         ColumnRange optionsRange = inPredicate.getLiteralOptionsRangeSet();
 
         ColumnRange intersect = optionsRange.intersect(compareExprRange);
-        Map<Expression, ColumnRange> newColumnRanges = replaceExprRange(exprRanges, compareExpr, intersect);
 
         EvaluateRangeResult result;
-        if (intersect.isEmptyRange()) {
-            result = new EvaluateRangeResult(BooleanLiteral.FALSE, newColumnRanges, ImmutableList.of(leftResult));
+        if (intersect.isEmptyRange() && inPredicate.optionsContainsNullLiteral()) {
+            // UNKNOWN is not a contradictory value domain. Keep the original range so
+            // enclosing expressions and NOT preserve SQL three-valued logic.
+            result = new EvaluateRangeResult(
+                    NullLiteral.BOOLEAN_INSTANCE, exprRanges, ImmutableList.of(leftResult), false);
         } else {
-            result = new EvaluateRangeResult(inPredicate, newColumnRanges, ImmutableList.of(leftResult));
+            Map<Expression, ColumnRange> newColumnRanges = replaceExprRange(exprRanges, compareExpr, intersect);
+            result = intersect.isEmptyRange()
+                    ? new EvaluateRangeResult(BooleanLiteral.FALSE, newColumnRanges, ImmutableList.of(leftResult))
+                    : new EvaluateRangeResult(inPredicate, newColumnRanges, ImmutableList.of(leftResult));
+            result = result.withRejectNot(false);
         }
-        result = result.withRejectNot(false);
         return result;
     }
 

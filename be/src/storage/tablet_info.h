@@ -294,8 +294,7 @@ public:
 
     const std::vector<VOlapTablePartition*>& get_partitions() const { return _partitions; }
 
-    // it's same with auto now because we only support transformed partition in auto partition. may expand in future
-    bool is_projection_partition() const { return _is_auto_partition; }
+    bool is_projection_partition() const { return _has_partition_function; }
     bool is_auto_partition() const { return _is_auto_partition; }
 
     bool is_auto_detect_overwrite() const { return _is_auto_detect_overwrite; }
@@ -353,6 +352,7 @@ private:
     VOlapTablePartition* _default_partition = nullptr;
 
     bool _is_auto_partition = false;
+    bool _has_partition_function = false;
     VExprContextSPtrs _part_func_ctx = {nullptr};
     VExprSPtrs _partition_function = {nullptr};
     TPartitionType::type _part_type; // support list or range

@@ -126,26 +126,19 @@ public class PredicateToRange {
         boolean isNotIn = predicate.isNotIn();
         RangeSet<PartitionKey> rangeSet = TreeRangeSet.create();
         for (Expr item : predicate.getListChildren()) {
-            PartitionKey itemKey = toPartitionKey(item);
-            if (isNotIn) {
-                RangeSet<PartitionKey> completeRangeSet = TreeRangeSet.create();
-                completeRangeSet.add(Range.open(minKey, itemKey));
-                completeRangeSet.add(Range.open(itemKey, maxKey));
-
-                RangeSet<PartitionKey> intersect = TreeRangeSet.create();
-                for (Range<PartitionKey> completeRange : completeRangeSet.asRanges()) {
-                    intersect.addAll(rangeSet.subRangeSet(completeRange));
+            if (item.isNullLiteral()) {
+                // Only the TRUE domain matters in a WHERE predicate. IN ignores NULL
+                // options, while NOT IN with a NULL option is never TRUE.
+                if (isNotIn) {
+                    return TreeRangeSet.create();
                 }
-                rangeSet = intersect;
-            } else {
-                rangeSet.add(Range.closed(itemKey, itemKey));
+                continue;
             }
+            rangeSet.add(Range.singleton(toPartitionKey(item)));
         }
 
-        if (isNotIn) {
-            rangeSet = rangeSet.complement();
-        }
-        return rangeSet;
+        // The caller intersects this domain with the actual partition ranges before normalizing it.
+        return isNotIn ? rangeSet.complement() : rangeSet;
     }
 
     private PartitionKey toPartitionKey(Expr expr) {

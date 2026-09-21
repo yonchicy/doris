@@ -62,6 +62,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -393,6 +394,148 @@ public class PartitionPrunerTest extends TestWithFeService {
     }
 
     @Test
+    public void testDateTruncListPartitionNullOnlyPrune() throws AnalysisException {
+        Column dateColumn = new Column("dt", ScalarType.createDatetimeV2Type(0), true);
+        SlotReference dateSlot = new SlotReference("dt", DateTimeV2Type.SYSTEM_DEFAULT);
+        List<Column> dateColumns = ImmutableList.of(dateColumn);
+        ListPartitionItem defaultPartition = createListPartitionItemFromValues(
+                dateColumns, ImmutableList.of(ImmutableList.<PartitionValue>of()));
+        defaultPartition.setDefaultPartition(true);
+        Map<String, PartitionItem> idToPartitions = ImmutableMap.of(
+                "pNull", createListPartitionItemFromValues(dateColumns, ImmutableList.of(
+                        ImmutableList.of(new PartitionValue("", true)))),
+                "pDay", createListPartitionItem(dateColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-23 00:00:00"))),
+                "pDefault", defaultPartition);
+        List<Expr> partitionExprs = ImmutableList.of(dateTrunc("dt", "day"));
+
+        PartitionPruneResult<String> isNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new IsNull(dateSlot), idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> isNotNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new Not(new IsNull(dateSlot)), idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> rangeResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), dateTimeRange(dateSlot,
+                        "2026-07-23 02:00:00", "2026-07-23 18:00:00"),
+                idToPartitions, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        Map<String, PartitionItem> nullOnlyPartition = ImmutableMap.of("pNull", idToPartitions.get("pNull"));
+        Expression inDate = new InPredicate(dateSlot,
+                ImmutableList.of(new DateTimeV2Literal("2026-07-23 00:00:00")));
+        PartitionPruneResult<String> inResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), inDate, nullOnlyPartition, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> inWithNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new InPredicate(dateSlot, ImmutableList.of(
+                        new DateTimeV2Literal("2026-07-23 00:00:00"), NullLiteral.INSTANCE)),
+                nullOnlyPartition, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> notInResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new Not(inDate), nullOnlyPartition, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> notInWithNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new Not(new InPredicate(dateSlot, ImmutableList.of(
+                        new DateTimeV2Literal("2026-07-23 00:00:00"), NullLiteral.INSTANCE))),
+                nullOnlyPartition, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+
+        assertPartitions(isNullResult, "pNull", "pDefault");
+        assertPartitions(isNotNullResult, "pDay", "pDefault");
+        assertPartitions(rangeResult, "pDay", "pDefault");
+        assertPartitions(inResult);
+        assertPartitions(inWithNullResult);
+        assertPartitions(notInResult);
+        assertPartitions(notInWithNullResult);
+    }
+
+    @Test
+    public void testDateTruncListPartitionNullAndNormalTuplePrune() throws AnalysisException {
+        Column dateColumn = new Column("dt", ScalarType.createDatetimeV2Type(0), true);
+        SlotReference dateSlot = new SlotReference("dt", DateTimeV2Type.SYSTEM_DEFAULT);
+        List<Column> dateColumns = ImmutableList.of(dateColumn);
+        Map<String, PartitionItem> idToPartitions = ImmutableMap.of(
+                "pMixed", createListPartitionItemFromValues(dateColumns, ImmutableList.of(
+                        ImmutableList.of(new PartitionValue("", true)),
+                        ImmutableList.of(new PartitionValue("2026-07-23 00:00:00")))),
+                "pOther", createListPartitionItem(dateColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-24 00:00:00"))));
+        List<Expr> partitionExprs = ImmutableList.of(dateTrunc("dt", "day"));
+
+        PartitionPruneResult<String> isNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new IsNull(dateSlot), idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> mixedDayResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new EqualTo(dateSlot,
+                        new DateTimeV2Literal("2026-07-23 16:00:00")),
+                idToPartitions, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> otherDayResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new EqualTo(dateSlot,
+                        new DateTimeV2Literal("2026-07-24 16:00:00")),
+                idToPartitions, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        Expression inWithNull = new InPredicate(dateSlot, ImmutableList.of(
+                new DateTimeV2Literal("2026-07-23 00:00:00"), NullLiteral.INSTANCE));
+        PartitionPruneResult<String> inWithNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), inWithNull, idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> notInWithNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new Not(inWithNull), idToPartitions, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        Map<String, PartitionItem> mixedOnlyPartition = ImmutableMap.of("pMixed", idToPartitions.get("pMixed"));
+        Expression disjointInWithNull = new InPredicate(dateSlot, ImmutableList.of(
+                new DateTimeV2Literal("2026-07-24 00:00:00"), NullLiteral.INSTANCE));
+        PartitionPruneResult<String> disjointInIsNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new IsNull(disjointInWithNull), mixedOnlyPartition, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> disjointNotInWithNullResult = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot), new Not(disjointInWithNull), mixedOnlyPartition, cascadesContext,
+                PartitionTableType.OLAP, partitionExprs, Optional.empty());
+
+        assertPartitions(isNullResult, "pMixed");
+        assertPartitions(mixedDayResult, "pMixed");
+        assertPartitions(otherDayResult, "pOther");
+        assertPartitions(inWithNullResult, "pMixed");
+        assertPartitions(notInWithNullResult, "pMixed");
+        assertPartitions(disjointInIsNullResult, "pMixed");
+        assertPartitions(disjointNotInWithNullResult);
+        Assertions.assertFalse(inWithNullResult.prunedPartitionPredicate.isPresent());
+        Assertions.assertFalse(notInWithNullResult.prunedPartitionPredicate.isPresent());
+    }
+
+    @Test
+    public void testDateTruncListPartitionNullPreservesMixedTupleCorrelation() throws AnalysisException {
+        Column dateColumn = new Column("dt", ScalarType.createDatetimeV2Type(0), true);
+        Column regionColumn = new Column("region", PrimitiveType.INT);
+        SlotReference dateSlot = new SlotReference("dt", DateTimeV2Type.SYSTEM_DEFAULT);
+        SlotReference regionSlot = new SlotReference("region", IntegerType.INSTANCE);
+        List<Column> partitionColumns = ImmutableList.of(dateColumn, regionColumn);
+        Map<String, PartitionItem> idToPartitions = ImmutableMap.of(
+                "pMixed", createListPartitionItemFromValues(partitionColumns, ImmutableList.of(
+                        ImmutableList.of(new PartitionValue("", true), new PartitionValue("1")),
+                        ImmutableList.of(new PartitionValue("2026-07-23 00:00:00"),
+                                new PartitionValue("2")))),
+                "pOther", createListPartitionItem(partitionColumns, ImmutableList.of(
+                        ImmutableList.of("2026-07-23 00:00:00", "1"))));
+        List<Expr> partitionExprs = ImmutableList.of(
+                dateTrunc("dt", "day"), new SlotRef(null, "region"));
+
+        PartitionPruneResult<String> nullRegionOne = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot, regionSlot),
+                new And(new IsNull(dateSlot), new EqualTo(regionSlot, Literal.of(1))),
+                idToPartitions, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> nullRegionTwo = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot, regionSlot),
+                new And(new IsNull(dateSlot), new EqualTo(regionSlot, Literal.of(2))),
+                idToPartitions, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+        PartitionPruneResult<String> dayRegionTwo = PartitionPruner.pruneWithResult(
+                ImmutableList.of(dateSlot, regionSlot),
+                new And(new EqualTo(dateSlot, new DateTimeV2Literal("2026-07-23 16:00:00")),
+                        new EqualTo(regionSlot, Literal.of(2))),
+                idToPartitions, cascadesContext, PartitionTableType.OLAP, partitionExprs, Optional.empty());
+
+        assertPartitions(nullRegionOne, "pMixed");
+        assertPartitions(nullRegionTwo);
+        assertPartitions(dayRegionTwo, "pMixed");
+    }
+
+    @Test
     public void testDateTruncListPartitionPreservesTupleCorrelation() throws AnalysisException {
         Column dateColumn1 = new Column("dt1", ScalarType.createDatetimeV2Type(0));
         Column dateColumn2 = new Column("dt2", ScalarType.createDatetimeV2Type(0));
@@ -505,6 +648,12 @@ public class PartitionPrunerTest extends TestWithFeService {
         Assertions.assertEquals(ImmutableList.of(), upperResult.partitions, timeUnit);
     }
 
+    private void assertPartitions(PartitionPruneResult<String> result, String... expectedPartitions) {
+        Assertions.assertEquals(expectedPartitions.length, result.partitions.size());
+        Assertions.assertEquals(new HashSet<>(ImmutableList.copyOf(expectedPartitions)),
+                new HashSet<>(result.partitions));
+    }
+
     private ListPartitionItem createListPartitionItem(String... values) throws AnalysisException {
         ImmutableList.Builder<PartitionKey> partitionKeys = ImmutableList.builder();
         for (String value : values) {
@@ -521,6 +670,15 @@ public class PartitionPrunerTest extends TestWithFeService {
         for (List<String> values : items) {
             partitionKeys.add(PartitionKey.createPartitionKey(
                     values.stream().map(PartitionValue::new).collect(ImmutableList.toImmutableList()), columns));
+        }
+        return new ListPartitionItem(partitionKeys.build());
+    }
+
+    private ListPartitionItem createListPartitionItemFromValues(
+            List<Column> columns, List<List<PartitionValue>> items) throws AnalysisException {
+        ImmutableList.Builder<PartitionKey> partitionKeys = ImmutableList.builder();
+        for (List<PartitionValue> values : items) {
+            partitionKeys.add(PartitionKey.createListPartitionKey(values, columns));
         }
         return new ListPartitionItem(partitionKeys.build());
     }

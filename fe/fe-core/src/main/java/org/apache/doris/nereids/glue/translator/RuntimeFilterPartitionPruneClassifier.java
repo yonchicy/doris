@@ -77,8 +77,8 @@ final class RuntimeFilterPartitionPruneClassifier {
         if (filterType == TRuntimeFilterType.BLOOM && partType == PartitionType.RANGE) {
             return Classification.unsupported("BLOOM runtime filter does not support RANGE partition pruning");
         }
-        if (hasUnsupportedAutomaticPartitionExpression(partitionInfo)) {
-            return Classification.unsupported("automatic partition expression boundary is not modeled");
+        if (hasFunctionPartitionExpression(partitionInfo)) {
+            return Classification.unsupported("partition expression boundary is not modeled");
         }
         if (nereidsTargetExpr.containsType(NoneMovableFunction.class)) {
             return Classification.unsupported("target expression contains non-movable function");
@@ -127,10 +127,7 @@ final class RuntimeFilterPartitionPruneClassifier {
         return Classification.supportedPartitions(leafSlot, partitionMonotonicity);
     }
 
-    private static boolean hasUnsupportedAutomaticPartitionExpression(PartitionInfo partitionInfo) {
-        if (!partitionInfo.enableAutomaticPartition()) {
-            return false;
-        }
+    private static boolean hasFunctionPartitionExpression(PartitionInfo partitionInfo) {
         for (Expr partitionExpr : partitionInfo.getPartitionExprs()) {
             if (containsFunctionCall(partitionExpr)) {
                 return true;

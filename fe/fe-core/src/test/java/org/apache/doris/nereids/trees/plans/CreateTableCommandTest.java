@@ -21,6 +21,7 @@ import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.ExprToExprNameVisitor;
 import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.PartitionDesc;
+import org.apache.doris.analysis.PartitionExprUtil;
 import org.apache.doris.analysis.SinglePartitionDesc;
 import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.StringLiteral;
@@ -737,6 +738,38 @@ public class CreateTableCommandTest extends TestWithFeService {
         Assertions.assertEquals(10, tb.getColumn("k2").getStrLen());
         Assertions.assertEquals(ScalarType.MAX_VARCHAR_LENGTH, tb.getColumn("k3").getStrLen());
         Assertions.assertEquals(10, tb.getColumn("k4").getStrLen());
+    }
+
+    @Test
+    public void testListDateTruncRejectsTimestampTzSourceColumn() {
+        AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
+                () -> getCreateTableStmt("create table test_list_date_trunc_timestamptz ("
+                        + "id int, event_time TIMESTAMPTZ(6)) "
+                        + "duplicate key(id) "
+                        + "partition by list(date_trunc(event_time, 'day')) "
+                        + "(partition p1 values in ('2026-07-23 00:00:00.000000+00:00')) "
+                        + "distributed by hash(id) buckets 1 "
+                        + "properties('replication_num' = '1')"));
+
+        Assertions.assertEquals(
+                PartitionExprUtil.LIST_DATE_TRUNC_TIMESTAMPTZ_ERROR,
+                exception.getMessage());
+
+        Assertions.assertDoesNotThrow(
+                () -> getCreateTableStmt("create table test_plain_list_timestamptz ("
+                        + "id int, event_time TIMESTAMPTZ(6)) "
+                        + "duplicate key(id) "
+                        + "partition by list(event_time) "
+                        + "(partition p1 values in ('2026-07-23 00:00:00.000000+00:00')) "
+                        + "distributed by hash(id) buckets 1 "
+                        + "properties('replication_num' = '1')"));
+        Assertions.assertDoesNotThrow(
+                () -> getCreateTableStmt("create table test_range_date_trunc_timestamptz ("
+                        + "id int, event_time TIMESTAMPTZ(6) not null) "
+                        + "duplicate key(id) "
+                        + "auto partition by range(date_trunc(event_time, 'day')) () "
+                        + "distributed by hash(id) buckets 1 "
+                        + "properties('replication_num' = '1')"));
     }
 
     @Test

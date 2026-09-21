@@ -113,6 +113,7 @@ public class ListPartitionDesc extends PartitionDesc {
             }
         }
 
+        validatePartitionExpressionColumns(partitionColumns);
         ListPartitionInfo listPartitionInfo = new ListPartitionInfo(this.isAutoCreatePartitions, this.partitionExprs,
                 partitionColumns);
         for (SinglePartitionDesc desc : singlePartitionDescs) {
@@ -120,5 +121,19 @@ public class ListPartitionDesc extends PartitionDesc {
             listPartitionInfo.handleNewSinglePartitionDesc(desc, partitionId, isTemp);
         }
         return listPartitionInfo;
+    }
+
+    private void validatePartitionExpressionColumns(List<Column> partitionColumns) throws DdlException {
+        // Keep descriptor-to-catalog conversion aligned with Nereids CREATE validation.
+        for (int i = 0; i < partitionExprs.size(); i++) {
+            Expr partitionExpr = partitionExprs.get(i);
+            if (partitionExpr instanceof FunctionCallExpr
+                    && ((FunctionCallExpr) partitionExpr).getFnName().getDb() == null
+                    && LIST_PARTITION_FUNCTION.equalsIgnoreCase(
+                            ((FunctionCallExpr) partitionExpr).getFnName().getFunction())
+                    && partitionColumns.get(i).getType().isTimeStampTz()) {
+                throw new DdlException(PartitionExprUtil.LIST_DATE_TRUNC_TIMESTAMPTZ_ERROR);
+            }
+        }
     }
 }

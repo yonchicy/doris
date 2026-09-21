@@ -68,6 +68,11 @@ public class LogicalResultSinkToShortCircuitPointQuery implements RewriteRuleFac
         if (olapTable.hasVariantColumns()) {
             return false;
         }
+        // Lazy point pruning models partition keys as raw-column values, which is invalid
+        // when a stored key is produced by a partition function.
+        if (olapTable.getPartitionInfo().hasPartitionFunction()) {
+            return false;
+        }
         return olapTable.getEnableLightSchemaChange() && olapTable.getEnableUniqueKeyMergeOnWrite()
                         && olapTable.storeRowColumn();
     }

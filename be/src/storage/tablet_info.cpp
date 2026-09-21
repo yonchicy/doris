@@ -470,14 +470,17 @@ VOlapTablePartitionParam::VOlapTablePartitionParam(std::shared_ptr<OlapTableSche
           _slots(_schema->tuple_desc()->slots()),
           _mem_tracker(std::make_unique<MemTracker>("OlapTablePartitionParam")),
           _part_type(t_param.partition_type) {
-    if (t_param.__isset.enable_automatic_partition && t_param.enable_automatic_partition) {
-        _is_auto_partition = true;
+    _is_auto_partition =
+            t_param.__isset.enable_automatic_partition && t_param.enable_automatic_partition;
+    _has_partition_function =
+            t_param.__isset.partition_function_exprs && !t_param.partition_function_exprs.empty();
+    if (_has_partition_function) {
         auto size = t_param.partition_function_exprs.size();
         _part_func_ctx.resize(size);
         _partition_function.resize(size);
         DCHECK((t_param.partition_type == TPartitionType::RANGE_PARTITIONED && size == 1) ||
                (t_param.partition_type == TPartitionType::LIST_PARTITIONED && size >= 1))
-                << "now support only 1 partition column for auto range partitions. "
+                << "now support only 1 partition expression for range partitions. "
                 << t_param.partition_type << " " << size;
         for (int i = 0; i < size; ++i) {
             Status st =
@@ -500,7 +503,7 @@ VOlapTablePartitionParam::VOlapTablePartitionParam(std::shared_ptr<OlapTableSche
         _master_address = std::make_shared<TNetworkAddress>(t_param.master_address);
     }
 
-    if (_is_auto_partition) {
+    if (_has_partition_function) {
         // the nullable mode depends on partition_exprs. not column slots. so use them.
         DCHECK(_partition_function.size() <= _slots.size())
                 << _partition_function.size() << ", " << _slots.size();

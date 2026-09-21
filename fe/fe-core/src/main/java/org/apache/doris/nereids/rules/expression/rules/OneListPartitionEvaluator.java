@@ -102,7 +102,13 @@ public class OneListPartitionEvaluator<K>
                 LiteralExpr legacyLiteral = item.getKeys().get(i);
                 Literal literal = Literal.fromLegacyLiteral(legacyLiteral, legacyLiteral.getType());
                 Expr partitionExpr = partitionExprs.get(i);
-                if (isDateTrunc(partitionExpr)) {
+                if (literal instanceof NullLiteral) {
+                    // Nullability is modeled separately by OneRangePartitionEvaluator. Keep an
+                    // unconstrained comparable domain here so IS NULL can match this tuple while
+                    // ordinary comparisons still fold to NULL from the replacement literal.
+                    inputBuilder.put(partitionSlot, new PartitionSlotInput(literal,
+                            ImmutableMap.of(partitionSlot, ColumnRange.all())));
+                } else if (isDateTrunc(partitionExpr)) {
                     ColumnRange range = getDateTruncRange((DateLiteral) legacyLiteral, partitionExpr);
                     inputBuilder.put(partitionSlot, new PartitionSlotInput(partitionSlot,
                             ImmutableMap.of(partitionSlot, range)));

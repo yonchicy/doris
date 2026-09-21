@@ -20,9 +20,11 @@ package org.apache.doris.mtmv;
 import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.PartitionKeyDesc;
+import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.StringLiteral;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Env;
+import org.apache.doris.catalog.MTMV;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.common.AnalysisException;
@@ -34,6 +36,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -273,6 +276,66 @@ public class MTMVRelatedPartitionDescGeneratorTest extends TestWithFeService {
         Assertions.assertThrows(AnalysisException.class,
                 () -> MTMVPartitionUtil.generateRelatedPartitionDescs(mtmvPartitionInfo, Maps.newHashMap(),
                         Lists.newArrayList(c1Column)));
+    }
+
+    @Test
+    public void testAlignRejectsDefaultListPartitionBeforeDescriptorConversion() throws Exception {
+        createTable("CREATE TABLE `t_default_list` (`c1` date, `c2` int)\n"
+                + "ENGINE=OLAP\n"
+                + "DUPLICATE KEY(`c1`)\n"
+                + "PARTITION BY LIST(c1) (PARTITION p1 VALUES IN ('2026-07-23'),"
+                + "PARTITION p_default) distributed by hash(c1) "
+                + "buckets 1 properties('replication_num' = '1');");
+        createTable("CREATE TABLE `t_default_list_expr` (`c1` date, `c2` int)\n"
+                + "ENGINE=OLAP\n"
+                + "DUPLICATE KEY(`c1`)\n"
+                + "PARTITION BY LIST(date_trunc(c1, 'day')) "
+                + "(PARTITION p1 VALUES IN ('2026-07-23'), PARTITION p_default) "
+                + "distributed by hash(c1) buckets 1 properties('replication_num' = '1');");
+        createTable("CREATE TABLE `t_list_expr` (`c1` date, `c2` int)\n"
+                + "ENGINE=OLAP\n"
+                + "DUPLICATE KEY(`c1`)\n"
+                + "PARTITION BY LIST(date_trunc(c1, 'day')) "
+                + "(PARTITION p1 VALUES IN ('2026-07-23'), PARTITION p2 VALUES IN ('2026-07-24')) "
+                + "distributed by hash(c1) buckets 1 properties('replication_num' = '1');");
+
+        Column c1Column = new Column("c1", PrimitiveType.DATE);
+        for (String tableName : Lists.newArrayList("t_default_list", "t_default_list_expr")) {
+            MTMVPartitionInfo followPartitionInfo = getMTMVPartitionInfo(Lists.newArrayList(tableName));
+            assertDefaultListPartitionRejectedOnAlign(followPartitionInfo, c1Column);
+
+            MTMVPartitionInfo exprPartitionInfo = getMTMVPartitionInfo(Lists.newArrayList(tableName));
+            exprPartitionInfo.setPartitionType(MTMVPartitionType.EXPR);
+            exprPartitionInfo.setExpr(new FunctionCallExpr("date_trunc",
+                    Lists.newArrayList(new SlotRef(null, "c1"), new StringLiteral("month")), true));
+            assertDefaultListPartitionRejectedOnAlign(exprPartitionInfo, c1Column);
+        }
+
+        MTMVPartitionInfo noDefaultFollowInfo = getMTMVPartitionInfo(Lists.newArrayList("t_list_expr"));
+        Assertions.assertDoesNotThrow(
+                () -> MTMVPartitionUtil.alignMvPartition(mockMtmv(noDefaultFollowInfo, c1Column)));
+
+        MTMVPartitionInfo noDefaultExprInfo = getMTMVPartitionInfo(Lists.newArrayList("t_list_expr"));
+        noDefaultExprInfo.setPartitionType(MTMVPartitionType.EXPR);
+        noDefaultExprInfo.setExpr(new FunctionCallExpr("date_trunc",
+                Lists.newArrayList(new SlotRef(null, "c1"), new StringLiteral("month")), true));
+        Assertions.assertDoesNotThrow(
+                () -> MTMVPartitionUtil.alignMvPartition(mockMtmv(noDefaultExprInfo, c1Column)));
+    }
+
+    private void assertDefaultListPartitionRejectedOnAlign(MTMVPartitionInfo partitionInfo, Column partitionColumn) {
+        AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
+                () -> MTMVPartitionUtil.alignMvPartition(mockMtmv(partitionInfo, partitionColumn)));
+        Assertions.assertTrue(exception.getMessage().contains("DEFAULT LIST partition"), exception.getMessage());
+    }
+
+    private MTMV mockMtmv(MTMVPartitionInfo partitionInfo, Column partitionColumn) {
+        MTMV mtmv = Mockito.mock(MTMV.class);
+        Mockito.when(mtmv.generateMvPartitionDescs()).thenReturn(Maps.newHashMap());
+        Mockito.when(mtmv.getMvPartitionInfo()).thenReturn(partitionInfo);
+        Mockito.when(mtmv.getMvProperties()).thenReturn(Maps.newHashMap());
+        Mockito.when(mtmv.getPartitionColumns()).thenReturn(Lists.newArrayList(partitionColumn));
+        return mtmv;
     }
 
     private MTMVPartitionInfo getMTMVPartitionInfo(List<String> pctTableNames) throws AnalysisException {

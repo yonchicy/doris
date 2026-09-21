@@ -128,9 +128,8 @@ public:
     }
 
     Status open(RowDescriptor* output_row_desc) {
-        if (_vpartition->is_auto_partition()) {
-            auto [part_ctxs, part_funcs] = _get_partition_function();
-            for (auto part_ctx : part_ctxs) {
+        if (_vpartition->is_projection_partition()) {
+            for (const auto& part_ctx : _vpartition->get_part_func_ctx()) {
                 RETURN_IF_ERROR(part_ctx->prepare(_state, *output_row_desc));
                 RETURN_IF_ERROR(part_ctx->open(_state));
             }

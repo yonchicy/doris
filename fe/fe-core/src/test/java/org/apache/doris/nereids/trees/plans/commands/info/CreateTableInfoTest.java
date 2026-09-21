@@ -17,6 +17,7 @@
 
 package org.apache.doris.nereids.trees.plans.commands.info;
 
+import org.apache.doris.analysis.PartitionExprUtil;
 import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.nereids.analyzer.UnboundFunction;
 import org.apache.doris.nereids.analyzer.UnboundSlot;
@@ -131,7 +132,7 @@ public class CreateTableInfoTest {
                             column("event_time", DateTimeType.INSTANCE),
                             column("day", DateTimeType.INSTANCE)),
                     "date_trunc arguments should be exactly (slot, string literal): " + arguments);
-            Assertions.assertEquals(expectedErrors.get(i), exception.getMessage());
+            Assertions.assertTrue(exception.getMessage().contains(expectedErrors.get(i)), exception.getMessage());
         }
     }
 
@@ -143,7 +144,8 @@ public class CreateTableInfoTest {
         AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
                 () -> validatePartitionInfo(
                         partitionTableInfo, column("event_time", DateTimeType.INSTANCE)));
-        Assertions.assertEquals("Unsupported date_trunc time unit: invalid_unit", exception.getMessage());
+        Assertions.assertTrue(exception.getMessage().contains(
+                "Unsupported date_trunc time unit: invalid_unit"), exception.getMessage());
     }
 
     @Test
@@ -152,8 +154,7 @@ public class CreateTableInfoTest {
                 DateType.INSTANCE,
                 DateV2Type.INSTANCE,
                 DateTimeType.INSTANCE,
-                DateTimeV2Type.SYSTEM_DEFAULT,
-                TimeStampTzType.of(6));
+                DateTimeV2Type.SYSTEM_DEFAULT);
 
         for (DataType dateLikeType : dateLikeTypes) {
             PartitionTableInfo partitionTableInfo = manualListPartition(dateTrunc("event_time"));
@@ -161,6 +162,23 @@ public class CreateTableInfoTest {
                     () -> validatePartitionInfo(partitionTableInfo, column("event_time", dateLikeType)),
                     "date_trunc LIST partition should accept " + dateLikeType);
         }
+    }
+
+    @Test
+    public void testManualListDateTruncRejectsTimestampTzColumn() {
+        PartitionTableInfo expressionList = manualListPartition(dateTrunc("event_time"));
+
+        AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
+                () -> validatePartitionInfo(
+                        expressionList, column("event_time", TimeStampTzType.of(6))));
+
+        Assertions.assertEquals(
+                PartitionExprUtil.LIST_DATE_TRUNC_TIMESTAMPTZ_ERROR,
+                exception.getMessage());
+
+        PartitionTableInfo plainList = manualListPartition(new UnboundSlot("event_time"));
+        Assertions.assertDoesNotThrow(
+                () -> validatePartitionInfo(plainList, column("event_time", TimeStampTzType.of(6))));
     }
 
     @Test

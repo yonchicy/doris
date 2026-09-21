@@ -75,6 +75,10 @@ suite("test_mtmv_list_expr_partition", "mtmv") {
 
     sql """drop materialized view if exists ${mvName};"""
 
+    // Seed a second month before creating the rollup MV. This lets the next
+    // refresh prove that only one of two existing month partitions is rebuilt.
+    sql """INSERT INTO ${tableName} VALUES (5, '2026-08-02 09:00:00', 'central', 50)"""
+
     // MV with date_trunc(month) expression rollup on a day-granularity LIST expr table
     sql """
         CREATE MATERIALIZED VIEW ${mvName}
@@ -88,14 +92,35 @@ suite("test_mtmv_list_expr_partition", "mtmv") {
 
     def rollupPartitions = sql """show partitions from ${mvName}"""
     logger.info("rollupPartitions: " + rollupPartitions.toString())
-    // LIST rollup truncates each day value to month granularity,
-    // producing a single MV list partition named after the month boundary.
-    assertEquals(1, rollupPartitions.size())
+    // LIST rollup truncates each day value to month granularity, producing one
+    // discrete MV partition boundary per month.
+    assertEquals(2, rollupPartitions.size())
     assertTrue(rollupPartitions.toString().contains("p_20260701000000"))
+    assertTrue(rollupPartitions.toString().contains("p_20260801000000"))
 
     sql """REFRESH MATERIALIZED VIEW ${mvName} AUTO"""
     waitingMTMVTaskFinishedByMvName(mvName)
     order_qt_rollup_month "SELECT id, col1, region, value FROM ${mvName} ORDER BY id"
+
+    // Change a day inside the existing July rollup. With August already snapshotted,
+    // AUTO refresh must be PARTIAL (one of two MV partitions), and the July predicate
+    // must cover the whole month rather than only its stored boundary day.
+    sql """INSERT INTO ${tableName} VALUES (6, '2026-07-23 18:00:00', 'south', 60)"""
+    sql """REFRESH MATERIALIZED VIEW ${mvName} AUTO"""
+    waitingMTMVTaskFinishedByMvName(mvName)
+    order_qt_rollup_month_incremental_refresh_mode """
+        SELECT RefreshMode
+        FROM tasks('type'='mv')
+        WHERE MvDatabaseName='${dbName}' AND MvName='${mvName}'
+        ORDER BY CreateTime DESC
+        LIMIT 1
+    """
+    order_qt_rollup_month_incremental_existing """
+        SELECT id, col1, region, value FROM ${mvName} ORDER BY id
+    """
+    order_qt_rollup_month_incremental_existing_base """
+        SELECT id, col1, region, value FROM ${tableName} ORDER BY id
+    """
 
     sql """drop materialized view if exists ${mvName};"""
 
@@ -110,9 +135,19 @@ suite("test_mtmv_list_expr_partition", "mtmv") {
         SELECT id, col1, region, value FROM ${tableName}
     """
     def sameGranularityPartitions = sql """show partitions from ${mvName}"""
+    assertEquals(4, sameGranularityPartitions.size())
     assertTrue(sameGranularityPartitions.toString().contains("p_20260723000000"))
     assertTrue(sameGranularityPartitions.toString().contains("p_20260724000000"))
     assertTrue(sameGranularityPartitions.toString().contains("p_20260725000000"))
+    assertTrue(sameGranularityPartitions.toString().contains("p_20260802000000"))
+    sql """REFRESH MATERIALIZED VIEW ${mvName} AUTO"""
+    waitingMTMVTaskFinishedByMvName(mvName)
+    order_qt_same_granularity_refresh """
+        SELECT id, col1, region, value FROM ${mvName} ORDER BY id
+    """
+    order_qt_same_granularity_base """
+        SELECT id, col1, region, value FROM ${tableName} ORDER BY id
+    """
     sql """drop materialized view if exists ${mvName};"""
 
     // MV with finer granularity (hour) than base table (day) should fail
@@ -126,6 +161,6 @@ suite("test_mtmv_list_expr_partition", "mtmv") {
             AS
             SELECT id, col1, region, value FROM ${tableName}
         """
-        exception "must not be finer than"
+        exception "can not roll up from"
     }
 }

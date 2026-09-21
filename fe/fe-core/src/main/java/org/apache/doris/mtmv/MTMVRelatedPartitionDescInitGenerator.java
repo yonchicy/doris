@@ -20,12 +20,14 @@ package org.apache.doris.mtmv;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.datasource.mvcc.MvccSnapshot;
 import org.apache.doris.datasource.mvcc.MvccUtil;
 
 import com.google.common.collect.Maps;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -39,8 +41,20 @@ public class MTMVRelatedPartitionDescInitGenerator implements MTMVRelatedPartiti
         Set<MTMVRelatedTableIf> relatedTables = mvPartitionInfo.getPctTables();
         Map<MTMVRelatedTableIf, Map<String, PartitionItem>> items = Maps.newHashMap();
         for (MTMVRelatedTableIf relatedTable : relatedTables) {
-            items.put(relatedTable,
-                    relatedTable.getAndCopyPartitionItems(MvccUtil.getSnapshotFromContext(relatedTable)));
+            Optional<MvccSnapshot> snapshot = MvccUtil.getSnapshotFromContext(relatedTable);
+            Map<String, PartitionItem> partitionItems = relatedTable.getAndCopyPartitionItems(snapshot);
+            // DEFAULT is a complement set. Reject it before toPartitionKeyDesc turns its synthetic MIN key
+            // into an ordinary concrete value and silently changes the partition semantics.
+            for (Map.Entry<String, PartitionItem> entry : partitionItems.entrySet()) {
+                if (entry.getValue().isDefaultPartition()) {
+                    throw new AnalysisException(String.format(
+                            "MTMV partitioning does not support DEFAULT LIST partition '%s' in related table "
+                                    + "'%s'; DEFAULT represents the complement of explicit values and cannot "
+                                    + "be converted to an MTMV partition descriptor",
+                            entry.getKey(), relatedTable.getName()));
+                }
+            }
+            items.put(relatedTable, partitionItems);
         }
         lastResult.setItems(items);
     }

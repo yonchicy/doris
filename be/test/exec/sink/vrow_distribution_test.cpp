@@ -29,6 +29,7 @@
 
 #include "common/config.h"
 #include "core/data_type/data_type_number.h"
+#include "exec/operator/group_commit_block_sink_operator.h"
 #include "exec/operator/operator_helper.h"
 #include "exec/sink/sink_test_utils.h"
 #include "exec/sink/vtablet_block_convertor.h"
@@ -60,6 +61,41 @@ Status _noop_create_partition_callback(void*, TCreatePartitionResult*) {
 
 Status _delegated_create_partition_callback(void* caller, TCreatePartitionResult* result) {
     return (*static_cast<std::function<Status(TCreatePartitionResult*)>*>(caller))(result);
+}
+
+TExpr make_bitnot_expr(TSlotId slot_id, TTupleId tuple_id) {
+    TTypeDesc int_type = create_type_desc(PrimitiveType::TYPE_INT);
+    int_type.__set_is_nullable(false);
+
+    TFunctionName function_name;
+    function_name.__set_function_name("bitnot");
+    TFunction function;
+    function.__set_name(function_name);
+    function.__set_binary_type(TFunctionBinaryType::BUILTIN);
+    function.__set_arg_types({int_type});
+    function.__set_ret_type(int_type);
+    function.__set_has_var_args(false);
+
+    TExprNode root;
+    root.__set_node_type(TExprNodeType::FUNCTION_CALL);
+    root.__set_num_children(1);
+    root.__set_type(int_type);
+    root.__set_is_nullable(false);
+    root.__set_fn(function);
+
+    TSlotRef slot_ref;
+    slot_ref.__set_slot_id(slot_id);
+    slot_ref.__set_tuple_id(tuple_id);
+    TExprNode slot;
+    slot.__set_node_type(TExprNodeType::SLOT_REF);
+    slot.__set_num_children(0);
+    slot.__set_type(int_type);
+    slot.__set_is_nullable(false);
+    slot.__set_slot_ref(slot_ref);
+
+    TExpr expr;
+    expr.nodes = {root, slot};
+    return expr;
 }
 
 std::unique_ptr<VRowDistributionHarness> _build_vrow_distribution_harness(
@@ -139,6 +175,87 @@ TEST(VRowDistributionTest, GenerateRowsDistributionNonAutoPartitionBasic) {
     EXPECT_EQ(row_part_tablet_ids[0].row_ids[1], 1);
     EXPECT_EQ(row_part_tablet_ids[0].partition_ids[0], 1);
     EXPECT_EQ(row_part_tablet_ids[0].partition_ids[1], 2);
+}
+
+TEST(VRowDistributionTest, GenerateRowsDistributionManualFunctionProjectionPartition) {
+    OperatorContext ctx;
+    constexpr int64_t txn_id = 1;
+
+    TOlapTableSchemaParam tschema;
+    TTupleId tablet_sink_tuple_id = 0;
+    int64_t schema_index_id = 0;
+    sink_test_utils::build_desc_tbl_and_schema(ctx, tschema, tablet_sink_tuple_id, schema_index_id,
+                                               false);
+
+    TSlotId partition_slot_id = tschema.slot_descs[0].id;
+    auto tpartition = sink_test_utils::build_partition_param(schema_index_id);
+    tpartition.__set_partition_type(TPartitionType::LIST_PARTITIONED);
+    tpartition.partitions[0].__set_in_keys({{sink_test_utils::make_int_literal(1)}});
+    tpartition.partitions[1].__set_in_keys({{sink_test_utils::make_int_literal(25)}});
+    tpartition.__set_enable_automatic_partition(false);
+    tpartition.__set_partition_function_exprs(
+            {make_bitnot_expr(partition_slot_id, tablet_sink_tuple_id)});
+    auto tlocation = sink_test_utils::build_location_param();
+
+    auto h = _build_vrow_distribution_harness(ctx, tschema, tpartition, tlocation,
+                                              tablet_sink_tuple_id, txn_id);
+    EXPECT_TRUE(h->vpartition->is_projection_partition());
+    EXPECT_FALSE(h->vpartition->is_auto_partition());
+
+    {
+        auto input_block = ColumnHelper::create_block<DataTypeInt32>({-2});
+        Block projected_block;
+        auto st = GroupCommitBlockSinkOperatorX::project_partition_block(
+                h->vpartition.get(), input_block, &projected_block);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        EXPECT_EQ(input_block.columns(), 1);
+        EXPECT_EQ(projected_block.columns(), 2);
+
+        VOlapTablePartition* partition = nullptr;
+        EXPECT_TRUE(h->vpartition->find_partition(&projected_block, 0, partition));
+        ASSERT_NE(partition, nullptr);
+        EXPECT_EQ(partition->id, 1);
+    }
+
+    {
+        auto input_block = ColumnHelper::create_block<DataTypeInt32>({-2, -26});
+        std::shared_ptr<Block> converted_block;
+        std::vector<RowPartTabletIds> row_part_tablet_ids;
+        int64_t rows_stat_val = input_block.rows();
+        auto st = h->row_distribution.generate_rows_distribution(
+                input_block, converted_block, row_part_tablet_ids, rows_stat_val);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+        ASSERT_NE(converted_block, nullptr);
+
+        ASSERT_EQ(row_part_tablet_ids.size(), 1);
+        ASSERT_EQ(row_part_tablet_ids[0].row_ids.size(), 2);
+        ASSERT_EQ(row_part_tablet_ids[0].partition_ids.size(), 2);
+        ASSERT_EQ(row_part_tablet_ids[0].tablet_ids.size(), 2);
+        EXPECT_EQ(row_part_tablet_ids[0].row_ids[0], 0);
+        EXPECT_EQ(row_part_tablet_ids[0].row_ids[1], 1);
+        EXPECT_EQ(row_part_tablet_ids[0].partition_ids[0], 1);
+        EXPECT_EQ(row_part_tablet_ids[0].partition_ids[1], 2);
+        EXPECT_EQ(row_part_tablet_ids[0].tablet_ids[0], 100);
+        EXPECT_EQ(row_part_tablet_ids[0].tablet_ids[1], 200);
+    }
+
+    {
+        auto input_block = ColumnHelper::create_block<DataTypeInt32>({-16});
+        std::shared_ptr<Block> converted_block;
+        std::vector<RowPartTabletIds> row_part_tablet_ids;
+        int64_t rows_stat_val = input_block.rows();
+        auto st = h->row_distribution.generate_rows_distribution(
+                input_block, converted_block, row_part_tablet_ids, rows_stat_val);
+        ASSERT_TRUE(st.ok()) << st.to_string();
+
+        ASSERT_EQ(row_part_tablet_ids.size(), 1);
+        EXPECT_TRUE(row_part_tablet_ids[0].row_ids.empty());
+        EXPECT_TRUE(row_part_tablet_ids[0].partition_ids.empty());
+        EXPECT_TRUE(row_part_tablet_ids[0].tablet_ids.empty());
+        ASSERT_TRUE(h->row_distribution._batching_block);
+        EXPECT_EQ(h->row_distribution._batching_block->rows(), 0);
+        EXPECT_FALSE(h->row_distribution.need_deal_batching());
+    }
 }
 
 TEST(VRowDistributionTest, GenerateRowsDistributionSkipsImmutablePartition) {
@@ -296,6 +413,8 @@ TEST(VRowDistributionTest, AutoPartitionMissingValuesBatchingDedupAndCreateParti
             ctx, tschema, tpartition, tlocation, tablet_sink_tuple_id, txn_id,
             &_delegated_create_partition_callback, &create_callback);
     harness = h.get();
+    EXPECT_TRUE(h->vpartition->is_projection_partition());
+    EXPECT_TRUE(h->vpartition->is_auto_partition());
 
     auto input_block = ColumnHelper::create_block<DataTypeInt32>({15, 15});
     std::shared_ptr<Block> converted_block;

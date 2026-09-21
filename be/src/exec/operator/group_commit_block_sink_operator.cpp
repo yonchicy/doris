@@ -64,6 +64,14 @@ Status GroupCommitBlockSinkLocalState::open(RuntimeState* state) {
     RETURN_IF_ERROR(_vpartition->init());
     _state = state;
 
+    if (!_vpartition->is_auto_partition() && _vpartition->is_projection_partition()) {
+        RowDescriptor output_row_desc(p._output_tuple_desc);
+        for (const auto& part_ctx : _vpartition->get_part_func_ctx()) {
+            RETURN_IF_ERROR(part_ctx->prepare(state, output_row_desc));
+            RETURN_IF_ERROR(part_ctx->open(state));
+        }
+    }
+
     _block_convertor = std::make_unique<OlapTableBlockConvertor>(p._output_tuple_desc);
     _block_convertor->init_autoinc_info(p._schema->db_id(), p._schema->table_id(),
                                         _state->batch_size());
@@ -301,6 +309,27 @@ Status GroupCommitBlockSinkOperatorX::prepare(RuntimeState* state) {
     return VExpr::open(_output_vexpr_ctxs, state);
 }
 
+Status GroupCommitBlockSinkOperatorX::project_partition_block(VOlapTablePartitionParam* vpartition,
+                                                              const Block& input_block,
+                                                              Block* projected_block) {
+    *projected_block = input_block;
+    std::vector<uint16_t> partition_cols_idx;
+    const auto& part_ctxs = vpartition->get_part_func_ctx();
+    const auto& part_funcs = vpartition->get_partition_function();
+    DCHECK_EQ(part_ctxs.size(), part_funcs.size());
+    partition_cols_idx.reserve(part_funcs.size());
+    for (size_t i = 0; i < part_funcs.size(); ++i) {
+        int result_idx = -1;
+        RETURN_IF_ERROR(part_funcs[i]->execute(part_ctxs[i].get(), projected_block, &result_idx));
+        DCHECK_NE(result_idx, -1);
+        partition_cols_idx.push_back(cast_set<uint16_t>(result_idx));
+    }
+    vpartition->set_transformed_slots(partition_cols_idx);
+    return Status::OK();
+}
+
+// Keep conversion, partition routing, filtering, and queue append in their established lifecycle order.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Status GroupCommitBlockSinkOperatorX::sink_impl(RuntimeState* state, Block* input_block, bool eos) {
     auto& local_state = get_local_state(state);
     SCOPED_TIMER(local_state.exec_time_counter());
@@ -364,8 +393,16 @@ Status GroupCommitBlockSinkOperatorX::sink_impl(RuntimeState* state, Block* inpu
         local_state._partitions.assign(rows, nullptr);
         local_state._filter_bitmap.Reset(rows);
 
+        Block partition_block;
+        Block* partition_lookup_block = block.get();
+        if (local_state._vpartition->is_projection_partition()) {
+            RETURN_IF_ERROR(project_partition_block(local_state._vpartition.get(), *block,
+                                                    &partition_block));
+            partition_lookup_block = &partition_block;
+        }
+
         for (int row_index = 0; row_index < rows; row_index++) {
-            local_state._vpartition->find_partition(block.get(), row_index,
+            local_state._vpartition->find_partition(partition_lookup_block, row_index,
                                                     local_state._partitions[row_index]);
             if (local_state._partitions[row_index] == nullptr) [[unlikely]] {
                 local_state._filter_bitmap.Set(row_index, true);

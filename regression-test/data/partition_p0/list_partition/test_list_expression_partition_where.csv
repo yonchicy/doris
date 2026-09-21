@@ -1,0 +1,5 @@
+10,2026-07-23 16:30:00,2025-07-23 17:00:00,east,filtered_stream_first_day
+11,2026-07-24 08:30:00,2025-07-24 09:00:00,east,filtered_stream_second_day
+12,2026-07-23 10:00:00,2025-07-23 11:00:00,east,unselected_before_range
+13,2026-07-24 12:00:00,2025-07-24 13:00:00,east,unselected_upper_bound
+14,2026-07-23 16:00:00,2025-07-23 17:00:00,west,unselected_region

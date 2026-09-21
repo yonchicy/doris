@@ -141,20 +141,22 @@ public class UpdateMvByPartitionCommand extends InsertOverwriteTableCommand {
         return Lists.newArrayList(partitionNames);
     }
 
-    private static Map<TableIf, Set<Expression>> constructTableWithPredicates(MTMV mv,
+    @VisibleForTesting
+    static Map<TableIf, Set<Expression>> constructTableWithPredicates(MTMV mv,
             Set<String> partitionNames, Map<TableIf, String> tableWithPartKey) throws AnalysisException {
         Set<PartitionItem> items = Sets.newHashSet();
         for (String partitionName : partitionNames) {
             PartitionItem partitionItem = mv.getPartitionItemOrAnalysisException(partitionName);
             items.add(partitionItem);
         }
+        // These are MV partition values: use its rollup granularity, or its physical expr for FOLLOW MVs.
+        Expr rollupExpr = mv.getMvPartitionInfo().getExpr();
+        Optional<Expr> mvPartitionExpr = rollupExpr != null ? Optional.of(rollupExpr)
+                : getPctPartitionExprAndPos(mv, mv.getMvPartitionInfo().getPartitionCol()).first;
         ImmutableMap.Builder<TableIf, Set<Expression>> builder = new ImmutableMap.Builder<>();
         tableWithPartKey.forEach((table, colName) -> {
             // the partition items of mv only have one partition column, so the key index is 0
-            Pair<Optional<Expr>, Integer> pctPartitionInfo =
-                    getPctPartitionExprAndPos((MTMVRelatedTableIf) table, colName);
-            builder.put(table, constructPredicates(items, new UnboundSlot(colName),
-                    pctPartitionInfo.first, 0));
+            builder.put(table, constructPredicates(items, new UnboundSlot(colName), mvPartitionExpr, 0));
         });
         return builder.build();
     }
@@ -182,12 +184,12 @@ public class UpdateMvByPartitionCommand extends InsertOverwriteTableCommand {
      * construct predicates for partition items, the min key is the min key of range items.
      * For list partition or less than partition items, the min key is null.
      * <p>
-     * When the pct column of a LIST partition is a partition expression such as date_trunc, the stored
+     * When the supplied LIST partition items are defined by an expression such as date_trunc, the stored
      * partition value is the truncated boundary, which means the source column range
      * [boundary, rangeEnd), so the predicate is inverted to range comparison instead of
      * `col IN (boundary)` on the raw column.
      *
-     * @param pctPartitionExpr the partition expression of the pct column in the base table,
+     * @param pctPartitionExpr the partition expression that defines the supplied LIST partition items,
      *                         empty if the column has no expression
      * @param keyIndex the index of the pct column value in the partition key, 0 for mv partition
      *                 items (mv has only one partition column) and the pct column position for

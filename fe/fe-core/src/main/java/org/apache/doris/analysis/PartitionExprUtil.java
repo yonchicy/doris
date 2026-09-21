@@ -54,6 +54,8 @@ public class PartitionExprUtil {
     public static final String DATETIME_FORMATTER = "%04d-%02d-%02d %02d:%02d:%02d";
     public static final String DATE_FORMATTER = "%04d-%02d-%02d";
     public static final String DATETIME_NAME_FORMATTER = "%04d%02d%02d%02d%02d%02d";
+    public static final String LIST_DATE_TRUNC_TIMESTAMPTZ_ERROR =
+            "TIMESTAMPTZ source columns are not supported in LIST date_trunc partition expressions";
     private static final Logger LOG = LogManager.getLogger(PartitionExprUtil.class);
     private static final PartitionExprUtil partitionExprUtil = new PartitionExprUtil();
     private static final int MAX_PARTITION_NAME_LENGTH = 50;

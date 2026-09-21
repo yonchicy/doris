@@ -17,14 +17,37 @@
 
 package org.apache.doris.nereids.trees.plans.commands;
 
+import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.FunctionCallExpr;
+import org.apache.doris.analysis.PartitionValue;
+import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.StringLiteral;
+import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.ListPartitionInfo;
+import org.apache.doris.catalog.ListPartitionItem;
+import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.Partition;
+import org.apache.doris.catalog.PartitionKey;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.nereids.exceptions.AnalysisException;
+import org.apache.doris.nereids.trees.expressions.EqualTo;
+import org.apache.doris.nereids.trees.expressions.SlotReference;
+import org.apache.doris.nereids.trees.expressions.literal.DateTimeV2Literal;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalFilter;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalOlapScan;
+import org.apache.doris.nereids.types.DateTimeV2Type;
+import org.apache.doris.qe.ConnectContext;
 
+import com.google.common.collect.ImmutableList;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 
 public class DeleteFromCommandTest {
 
@@ -68,6 +91,47 @@ public class DeleteFromCommandTest {
         Assertions.assertSame(initialException, mergedException.getSuppressed()[0]);
     }
 
+    @Test
+    public void testDeletePrunesDateTruncListPartitionBySourceRange() throws Exception {
+        Column partitionColumn = new Column("dt", ScalarType.createDatetimeV2Type(0));
+        ArrayList<Expr> partitionExprs = new ArrayList<>(ImmutableList.of(
+                new FunctionCallExpr("date_trunc", ImmutableList.of(
+                        new SlotRef(null, "dt"), new StringLiteral("day")), false)));
+        ListPartitionInfo partitionInfo = new ListPartitionInfo(false, partitionExprs,
+                ImmutableList.of(partitionColumn));
+        partitionInfo.setItem(1L, false, createListPartitionItem(partitionColumn, "2026-07-23 00:00:00"));
+        partitionInfo.setItem(2L, false, createListPartitionItem(partitionColumn, "2026-07-24 00:00:00"));
+
+        Partition dayPartition = mockPartition(1L, "p_day");
+        Partition nextPartition = mockPartition(2L, "p_next");
+        OlapTable table = Mockito.mock(OlapTable.class);
+        Mockito.when(table.getPartitionInfo()).thenReturn(partitionInfo);
+        Mockito.when(table.getPartitionColumns()).thenReturn(ImmutableList.of(partitionColumn));
+        Mockito.when(table.getPartition("p_day")).thenReturn(dayPartition);
+        Mockito.when(table.getPartition("p_next")).thenReturn(nextPartition);
+        Mockito.when(table.getPartition(1L)).thenReturn(dayPartition);
+        Mockito.when(table.getPartition(2L)).thenReturn(nextPartition);
+
+        SlotReference partitionSlot = new SlotReference("dt", DateTimeV2Type.SYSTEM_DEFAULT);
+        PhysicalFilter<?> filter = Mockito.mock(PhysicalFilter.class);
+        Mockito.when(filter.getOutput()).thenReturn(ImmutableList.of(partitionSlot));
+        Mockito.when(filter.getPredicate()).thenReturn(
+                new EqualTo(partitionSlot, new DateTimeV2Literal("2026-07-23 12:00:00")));
+        PhysicalOlapScan scan = Mockito.mock(PhysicalOlapScan.class);
+        DeleteFromCommand command = new DeleteFromCommand(Collections.emptyList(), null,
+                false, Collections.emptyList(), null);
+
+        ConnectContext connectContext = new ConnectContext();
+        connectContext.setThreadLocalInfo();
+        try {
+            List<Partition> selectedPartitions = invokeGetSelectedPartitions(command, table, filter, scan,
+                    new ArrayList<>(ImmutableList.of("p_day", "p_next")));
+            Assertions.assertEquals(ImmutableList.of(dayPartition), selectedPartitions);
+        } finally {
+            ConnectContext.remove();
+        }
+    }
+
     // Use reflection to validate the helper without exposing it only for tests.
     private AnalysisException invokeBuildDeleteFallbackException(DeleteFromCommand command,
             Exception initialException, Exception fallbackException)
@@ -76,5 +140,27 @@ public class DeleteFromCommandTest {
                 Exception.class, Exception.class);
         method.setAccessible(true);
         return (AnalysisException) method.invoke(command, initialException, fallbackException);
+    }
+
+    private List<Partition> invokeGetSelectedPartitions(DeleteFromCommand command, OlapTable table,
+            PhysicalFilter<?> filter, PhysicalOlapScan scan, List<String> partitionNames)
+            throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
+        Method method = DeleteFromCommand.class.getDeclaredMethod("getSelectedPartitions",
+                OlapTable.class, PhysicalFilter.class, PhysicalOlapScan.class, List.class);
+        method.setAccessible(true);
+        return (List<Partition>) method.invoke(command, table, filter, scan, partitionNames);
+    }
+
+    private ListPartitionItem createListPartitionItem(Column partitionColumn, String value) throws Exception {
+        PartitionKey key = PartitionKey.createListPartitionKey(
+                ImmutableList.of(new PartitionValue(value)), ImmutableList.of(partitionColumn));
+        return new ListPartitionItem(ImmutableList.of(key));
+    }
+
+    private Partition mockPartition(long id, String name) {
+        Partition partition = Mockito.mock(Partition.class);
+        Mockito.when(partition.getId()).thenReturn(id);
+        Mockito.when(partition.getName()).thenReturn(name);
+        return partition;
     }
 }

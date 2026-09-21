@@ -299,6 +299,11 @@ public class PartitionTableInfo {
         } catch (org.apache.doris.common.AnalysisException e) {
             throw new AnalysisException("partition expr " + function.toSql() + " is illegal!");
         }
+        // LIST date_trunc stores wall-clock boundaries, but TIMESTAMPTZ routing uses timezone-aware values.
+        // Reject this combination until FE and BE share one persisted timezone boundary representation.
+        if (partitionColumn.getType().isTimeStampTzType()) {
+            throw new AnalysisException(PartitionExprUtil.LIST_DATE_TRUNC_TIMESTAMPTZ_ERROR);
+        }
     }
 
     /**

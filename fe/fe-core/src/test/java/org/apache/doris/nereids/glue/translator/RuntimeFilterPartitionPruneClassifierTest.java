@@ -34,6 +34,7 @@ import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.RangePartitionItem;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.GreaterThan;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
@@ -53,6 +54,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -113,29 +115,47 @@ class RuntimeFilterPartitionPruneClassifierTest {
                         new StringLiteral("rfpp_expr_in_only_error")), false),
                 targetSlot -> new AssertTrue(
                         new GreaterThan(targetSlot, new IntegerLiteral(0)),
-                        new VarcharLiteral("rfpp_expr_in_only_error")));
+                        new VarcharLiteral("rfpp_expr_in_only_error")), new ArrayList<>());
 
         Assertions.assertFalse(classification.canPrunePartitions());
         Assertions.assertTrue(classification.getUnsupportedReason().contains("non-movable"));
         Assertions.assertTrue(classification.getPartitionMonotonicity().isEmpty());
     }
 
+    @Test
+    void testRejectManualListPartitionFunctionExpression() {
+        RuntimeFilterPartitionPruneClassifier.Classification classification = classify(
+                TRuntimeFilterType.IN, PartitionType.LIST, ListPartitionItem.DUMMY_ITEM,
+                targetSlot -> targetSlot, targetSlot -> targetSlot,
+                new ArrayList<>(ImmutableList.of(new FunctionCallExpr("date_trunc", ImmutableList.of(
+                        new SlotRef(null, "part_col"), new StringLiteral("day")), false))));
+
+        Assertions.assertFalse(classification.canPrunePartitions());
+        Assertions.assertTrue(classification.getUnsupportedReason().contains("partition expression"));
+        Assertions.assertTrue(classification.getPartitionMonotonicity().isEmpty());
+    }
+
     private RuntimeFilterPartitionPruneClassifier.Classification classify(
             TRuntimeFilterType filterType, PartitionType partitionType, PartitionItem partitionItem) {
         return classify(filterType, partitionType, partitionItem, targetSlot -> targetSlot,
-                targetSlot -> targetSlot);
+                targetSlot -> targetSlot, new ArrayList<>());
     }
 
     private RuntimeFilterPartitionPruneClassifier.Classification classify(
             TRuntimeFilterType filterType, PartitionType partitionType, PartitionItem partitionItem,
             Function<SlotRef, Expr> legacyTargetFactory,
-            Function<SlotReference, Expression> nereidsTargetFactory) {
-        Column partitionColumn = new Column("part_col", PrimitiveType.INT);
+            Function<SlotReference, Expression> nereidsTargetFactory,
+            ArrayList<Expr> partitionExprs) {
+        boolean hasPartitionFunction = !partitionExprs.isEmpty();
+        Column partitionColumn = hasPartitionFunction
+                ? new Column("part_col", ScalarType.createDatetimeV2Type(0))
+                : new Column("part_col", PrimitiveType.INT);
         SlotDescriptor slotDescriptor = new SlotDescriptor(new SlotId(1), new TupleId(1));
         slotDescriptor.setColumn(partitionColumn);
         slotDescriptor.setType(partitionColumn.getType());
         SlotRef targetSlot = new SlotRef(slotDescriptor);
-        SlotReference nereidsTarget = new SlotReference("part_col", IntegerType.INSTANCE);
+        SlotReference nereidsTarget = new SlotReference("part_col",
+                hasPartitionFunction ? DateTimeV2Type.SYSTEM_DEFAULT : IntegerType.INSTANCE);
 
         OlapTable table = Mockito.mock(OlapTable.class);
         PartitionInfo partitionInfo = Mockito.mock(PartitionInfo.class);
@@ -145,6 +165,8 @@ class RuntimeFilterPartitionPruneClassifierTest {
         Mockito.when(table.getPartitionInfo()).thenReturn(partitionInfo);
         Mockito.when(partitionInfo.getType()).thenReturn(partitionType);
         Mockito.when(partitionInfo.getPartitionColumns()).thenReturn(ImmutableList.of(partitionColumn));
+        Mockito.when(partitionInfo.getPartitionExprs()).thenReturn(partitionExprs);
+        Mockito.when(partitionInfo.enableAutomaticPartition()).thenReturn(false);
         Mockito.when(partitionInfo.getItem(1L)).thenReturn(partitionItem);
         Mockito.when(partitionInfo.getItem(2L)).thenReturn(partitionItem);
 

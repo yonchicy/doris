@@ -21,4 +21,40 @@
 2	2026-07-23T10:00	west	20
 3	2026-07-24T12:00	east	30
 4	2026-07-25T09:00	north	40
+5	2026-08-02T09:00	central	50
+
+-- !rollup_month_incremental_refresh_mode --
+PARTIAL
+
+-- !rollup_month_incremental_existing --
+1	2026-07-23T16:00	east	10
+2	2026-07-23T10:00	west	20
+3	2026-07-24T12:00	east	30
+4	2026-07-25T09:00	north	40
+5	2026-08-02T09:00	central	50
+6	2026-07-23T18:00	south	60
+
+-- !rollup_month_incremental_existing_base --
+1	2026-07-23T16:00	east	10
+2	2026-07-23T10:00	west	20
+3	2026-07-24T12:00	east	30
+4	2026-07-25T09:00	north	40
+5	2026-08-02T09:00	central	50
+6	2026-07-23T18:00	south	60
+
+-- !same_granularity_refresh --
+1	2026-07-23T16:00	east	10
+2	2026-07-23T10:00	west	20
+3	2026-07-24T12:00	east	30
+4	2026-07-25T09:00	north	40
+5	2026-08-02T09:00	central	50
+6	2026-07-23T18:00	south	60
+
+-- !same_granularity_base --
+1	2026-07-23T16:00	east	10
+2	2026-07-23T10:00	west	20
+3	2026-07-24T12:00	east	30
+4	2026-07-25T09:00	north	40
+5	2026-08-02T09:00	central	50
+6	2026-07-23T18:00	south	60
 

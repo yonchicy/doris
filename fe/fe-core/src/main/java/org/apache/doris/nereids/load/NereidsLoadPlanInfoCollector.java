@@ -500,10 +500,10 @@ public class NereidsLoadPlanInfoCollector extends DefaultPlanVisitor<Void, PlanT
                 PartitionInfo partitionInfo = destTable.getPartitionInfo();
                 Map<Long, PartitionItem> idToPartitions = partitionInfo.getIdToItem(false);
                 Optional<SortedPartitionRanges<Long>> sortedPartitionRanges = Optional.empty();
-                List<Long> prunedPartitions = PartitionPruner.prune(
+                List<Long> prunedPartitions = PartitionPruner.pruneWithResult(
                         partitionSlots, filterPredicate, idToPartitions,
                         CascadesContext.initContext(new StatementContext(), logicalPlan, PhysicalProperties.ANY),
-                        PartitionTableType.OLAP, sortedPartitionRanges).first;
+                        PartitionTableType.OLAP, partitionInfo.getPartitionExprs(), sortedPartitionRanges).partitions;
                 return prunedPartitions;
             } else {
                 return null;

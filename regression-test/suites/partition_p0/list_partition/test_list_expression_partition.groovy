@@ -246,4 +246,89 @@ suite("test_list_expression_partition", "p0") {
         FROM test_list_expression_partition
         ORDER BY id
     """
+
+    // A WHERE clause makes the load planner prune the destination partitions.
+    // The first day's boundary is outside this filter, but its afternoon rows
+    // must still be loaded. The ordinary LIST column also participates in pruning.
+    streamLoad {
+        table "test_list_expression_partition"
+        set "column_separator", ","
+        set "where", "col1 >= '2026-07-23 12:00:00'" +
+                " AND col1 < '2026-07-24 12:00:00' AND region = 'east'"
+        file "test_list_expression_partition_where.csv"
+        check { result, exception, startTime, endTime ->
+            if (exception != null) {
+                throw exception
+            }
+            def json = parseJson(result)
+            assertEquals("success", json.Status.toLowerCase())
+            assertEquals(5, json.NumberTotalRows)
+            assertEquals(2, json.NumberLoadedRows)
+            assertEquals(3, json.NumberUnselectedRows)
+            assertEquals(0, json.NumberFilteredRows)
+        }
+    }
+    sql "SYNC"
+    order_qt_filtered_stream_load """
+        SELECT id, col1, col2, region, value
+        FROM test_list_expression_partition
+        ORDER BY id
+    """
+
+    // Both days contain matching rows. Treating their midnight keys as points
+    // would select only the second day and silently leave the first day's rows.
+    sql """
+        DELETE FROM test_list_expression_partition
+        WHERE col1 >= '2026-07-23 12:00:00'
+          AND col1 < '2026-07-24 12:00:00'
+          AND region = 'east'
+    """
+    order_qt_delete_cross_day """
+        SELECT id, col1, col2, region, value
+        FROM test_list_expression_partition
+        ORDER BY id
+    """
+
+    // Exercise the explicit-partition path and the second expression column.
+    // Other rows in this same partition must retain the original row predicate.
+    sql """
+        DELETE FROM test_list_expression_partition PARTITION p_day_23_east
+        WHERE col2 = '2025-07-23 09:45:00'
+    """
+    order_qt_delete_explicit_partition """
+        SELECT id, col1, col2, region, value
+        FROM test_list_expression_partition
+        ORDER BY id
+    """
+
+    sql "DROP TABLE IF EXISTS test_list_expression_partition_delete_auto"
+    sql """
+        CREATE TABLE test_list_expression_partition_delete_auto (
+            dt DATETIME NOT NULL,
+            id INT NOT NULL,
+            value INT
+        )
+        DUPLICATE KEY(dt, id)
+        AUTO PARTITION BY LIST(DATE_TRUNC(dt, 'day')) ()
+        DISTRIBUTED BY HASH(id) BUCKETS 1
+        PROPERTIES("replication_num" = "1")
+    """
+    sql """
+        INSERT INTO test_list_expression_partition_delete_auto VALUES
+            ('2026-07-23 08:00:00', 1, 10),
+            ('2026-07-23 16:00:00', 2, 20),
+            ('2026-07-24 08:00:00', 3, 30),
+            ('2026-07-24 16:00:00', 4, 40),
+            ('2026-07-25 08:00:00', 5, 50)
+    """
+    order_qt_auto_delete_before """
+        SELECT dt, id, value FROM test_list_expression_partition_delete_auto ORDER BY dt, id
+    """
+    sql """
+        DELETE FROM test_list_expression_partition_delete_auto
+        WHERE dt >= '2026-07-23 12:00:00' AND dt < '2026-07-24 12:00:00'
+    """
+    order_qt_auto_delete_cross_day """
+        SELECT dt, id, value FROM test_list_expression_partition_delete_auto ORDER BY dt, id
+    """
 }

@@ -33,6 +33,7 @@ import org.apache.doris.nereids.parser.NereidsParser;
 import org.apache.doris.nereids.sqltest.SqlTestBase;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
 import org.apache.doris.nereids.trees.plans.Plan;
+import org.apache.doris.nereids.trees.plans.commands.CreateMTMVCommand;
 import org.apache.doris.nereids.trees.plans.commands.info.ColumnDefinition;
 import org.apache.doris.nereids.trees.plans.commands.info.DistributionDescriptor;
 import org.apache.doris.nereids.trees.plans.commands.info.MTMVPartitionDefinition;
@@ -337,6 +338,64 @@ public class MTMVPlanUtilTest extends SqlTestBase {
         Assertions.assertTrue(mtmvAnalyzeQueryInfo.getRelation().getBaseTables().size() == 1);
         Assertions.assertTrue(mtmvAnalyzeQueryInfo.getMvPartitionInfo().getRelatedCol().equals("id"));
         Assertions.assertTrue(mtmvAnalyzeQueryInfo.getColumnDefinitions().size() == 2);
+    }
+
+    @Test
+    public void testCreateMTMVRejectsDefaultListPartition() throws Exception {
+        createTables(
+                createListPartitionTableSql("mtmv_default_plain_list", "dt", true),
+                createListPartitionTableSql("mtmv_default_expr_list", "date_trunc(dt, 'day')", true),
+                createListPartitionTableSql("mtmv_plain_list", "dt", false),
+                createListPartitionTableSql("mtmv_expr_list", "date_trunc(dt, 'day')", false));
+
+        assertDefaultListPartitionRejected("mtmv_default_plain_list", MTMVPartitionType.FOLLOW_BASE_TABLE);
+        assertDefaultListPartitionRejected("mtmv_default_plain_list", MTMVPartitionType.EXPR);
+        assertDefaultListPartitionRejected("mtmv_default_expr_list", MTMVPartitionType.FOLLOW_BASE_TABLE);
+        assertDefaultListPartitionRejected("mtmv_default_expr_list", MTMVPartitionType.EXPR);
+
+        Assertions.assertDoesNotThrow(
+                () -> analyzeCreateMtmv("mtmv_plain_list", MTMVPartitionType.FOLLOW_BASE_TABLE));
+        Assertions.assertDoesNotThrow(
+                () -> analyzeCreateMtmv("mtmv_plain_list", MTMVPartitionType.EXPR));
+        Assertions.assertDoesNotThrow(
+                () -> analyzeCreateMtmv("mtmv_expr_list", MTMVPartitionType.FOLLOW_BASE_TABLE));
+        Assertions.assertDoesNotThrow(
+                () -> analyzeCreateMtmv("mtmv_expr_list", MTMVPartitionType.EXPR));
+    }
+
+    private void assertDefaultListPartitionRejected(String tableName, MTMVPartitionType partitionType) {
+        AnalysisException exception = Assertions.assertThrows(AnalysisException.class,
+                () -> analyzeCreateMtmv(tableName, partitionType));
+        Assertions.assertTrue(exception.getMessage().contains("DEFAULT LIST partition"), exception.getMessage());
+    }
+
+    private void analyzeCreateMtmv(String tableName, MTMVPartitionType partitionType) throws Exception {
+        String partitionExpression = partitionType == MTMVPartitionType.FOLLOW_BASE_TABLE
+                ? "dt" : "date_trunc(dt, 'month')";
+        String sql = "CREATE MATERIALIZED VIEW mv_default_list_probe\n"
+                + "BUILD DEFERRED REFRESH COMPLETE ON MANUAL\n"
+                + "PARTITION BY (" + partitionExpression + ")\n"
+                + "DISTRIBUTED BY RANDOM BUCKETS 1\n"
+                + "PROPERTIES ('replication_num' = '1')\n"
+                + "AS SELECT id, dt FROM test." + tableName;
+        createStatementCtx(sql);
+        LogicalPlan logicalPlan = new NereidsParser().parseSingle(sql);
+        Assertions.assertInstanceOf(CreateMTMVCommand.class, logicalPlan);
+        ((CreateMTMVCommand) logicalPlan).getCreateMTMVInfo().analyze(connectContext);
+    }
+
+    private String createListPartitionTableSql(String tableName, String partitionExpression,
+            boolean withDefaultPartition) {
+        String secondPartition = withDefaultPartition
+                ? "PARTITION p_default"
+                : "PARTITION p2 VALUES IN ('2026-07-24 00:00:00')";
+        return "CREATE TABLE " + tableName + " (id BIGINT, dt DATETIME)\n"
+                + "DUPLICATE KEY(id)\n"
+                + "PARTITION BY LIST(" + partitionExpression + ") (\n"
+                + "PARTITION p1 VALUES IN ('2026-07-23 00:00:00'),\n"
+                + secondPartition + ")\n"
+                + "DISTRIBUTED BY HASH(id) BUCKETS 1\n"
+                + "PROPERTIES ('replication_num' = '1')";
     }
 
     @Test

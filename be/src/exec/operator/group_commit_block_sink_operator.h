@@ -108,6 +108,10 @@ public:
 
     Status sink_impl(RuntimeState* state, Block* block, bool eos) override;
 
+    // Build a routing-only block so projection columns never enter the group-commit WAL.
+    static Status project_partition_block(VOlapTablePartitionParam* vpartition,
+                                          const Block& input_block, Block* projected_block);
+
 private:
     friend class GroupCommitBlockSinkLocalState;
 
